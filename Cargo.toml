@@ -1,0 +1,27 @@
+[package]
+name = "kube_config_updater"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.100"
+base64 = "0.22.1"
+chrono = { version = "0.4.42", features = ["serde"] }
+clap = { version = "4.5.4", features = ["derive"] }
+dirs = "5.0.1"
+env_logger = "0.11.8"
+flexi_logger = "0.31.4"
+indicatif = "0.17.8"
+indexmap = { version = "2.11.4", features = ["serde"] }
+log = "0.4.28"
+rayon = "1.10.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+serde_yaml = "0.9.34"
+sha2 = "0.10.9"
+ssh2 = "0.9.5"
+toml = "0.9.7"
+x509-parser = "0.18.0"
+
+[dev-dependencies]
+tempfile = "3.10.1"
