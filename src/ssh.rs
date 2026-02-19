@@ -28,6 +28,7 @@ pub fn fetch_remote_file(
     user: &str,
     remote_path: &str,
     identity_file: Option<&str>,
+    password: Option<&str>,
 ) -> Result<Vec<u8>, anyhow::Error> {
     log::info!("[{}] Attempting to connect to {}", server_name, server_address);
 
@@ -42,15 +43,28 @@ pub fn fetch_remote_file(
     if let Some(key_path) = identity_file {
         log::info!("[{}] Authenticating with private key: {}", server_name, key_path);
         session.userauth_pubkey_file(user, None, Path::new(key_path), None)?;
+    } else if let Some(pw) = password {
+        log::info!("[{}] Authenticating with password", server_name);
+        session.userauth_password(user, pw)?;
     } else {
         log::info!("[{}] Authenticating with SSH agent", server_name);
         session.userauth_agent(user)?;
     }
     log::info!("[{}] Authentication successful", server_name);
 
+    let (command, use_sudo) = if password.is_some() {
+        (format!("sudo -S cat {}", remote_path), true)
+    } else {
+        (format!("cat {}", remote_path), false)
+    };
+
     let mut channel = session.channel_session()?;
-    let command = format!("cat {}", remote_path);
     channel.exec(&command)?;
+
+    if use_sudo {
+        use std::io::Write;
+        channel.write_all(format!("{}\n", password.unwrap()).as_bytes())?;
+    }
 
     let mut contents = Vec::new();
     channel.read_to_end(&mut contents)?;

@@ -1,8 +1,14 @@
 use super::config::{load_config, Config, Server};
-use super::kube::process_kubeconfig_file;
+use super::kube::{merge_into_main_kubeconfig, process_kubeconfig_file, KubeConfig};
 use std::fs;
 use std::io::Write;
+use std::path::PathBuf;
+use std::sync::Mutex;
 use tempfile::{Builder, NamedTempFile, TempDir};
+
+/// Serialises access to ~/.kube/config across all tests that read or write it,
+/// preventing the parallel test runner from corrupting the file mid-test.
+static KUBE_CONFIG_LOCK: Mutex<()> = Mutex::new(());
 
 fn create_test_config(content: &str) -> NamedTempFile {
     let mut file = NamedTempFile::new().unwrap();
@@ -217,6 +223,7 @@ fn test_process_kubeconfig_file_updates_content() {
         target_ip,
         source_hash,
         &target_context,
+        "test-server",
         false,
     )
     .unwrap();
@@ -256,6 +263,7 @@ fn test_process_kubeconfig_file_dry_run() {
         "9.9.9.9",
         "test_hash_456",
         &Some("new-context".to_string()),
+        "test-server",
         true,
     )
     .unwrap();
@@ -277,6 +285,7 @@ fn test_process_kubeconfig_file_hash_change_warning() {
         "9.9.9.9",
         "first_hash",
         &None,
+        "test-server",
         false,
     )
     .unwrap();
@@ -288,6 +297,7 @@ fn test_process_kubeconfig_file_hash_change_warning() {
         "9.9.9.9",
         "second_hash",
         &None,
+        "test-server",
         false,
     );
     assert!(result.is_ok());
@@ -298,11 +308,13 @@ fn test_process_kubeconfig_no_context_update() {
     let temp_dir = Builder::new().prefix("test_kube_no_context").tempdir().unwrap();
     let kubeconfig_path = setup_test_kubeconfig(&temp_dir, TEST_KUBECONFIG_CONTENT);
 
+    // When no target_context is set, server_name is used as the unique_name
     process_kubeconfig_file(
         &kubeconfig_path,
         "8.8.8.8",
         "some_hash",
-        &None, // No target context
+        &None, // No target context — server_name becomes the unique_name
+        "my-server",
         false,
     )
     .unwrap();
@@ -310,7 +322,465 @@ fn test_process_kubeconfig_no_context_update() {
     let updated_content = fs::read_to_string(kubeconfig_path).unwrap();
     let updated_kubeconfig: super::kube::KubeConfig = serde_yaml::from_str(&updated_content).unwrap();
 
-    // Context name and current-context should remain unchanged
-    assert_eq!(updated_kubeconfig.contexts[0].name, "old-context");
-    assert_eq!(updated_kubeconfig.current_context, "old-context");
+    // Context, cluster, and current-context should all be renamed to server_name
+    assert_eq!(updated_kubeconfig.contexts[0].name, "my-server");
+    assert_eq!(updated_kubeconfig.current_context, "my-server");
+    assert_eq!(updated_kubeconfig.clusters[0].name, "my-server");
+}
+
+#[test]
+fn test_cert_expiry_no_file() {
+    let path = std::path::Path::new("/tmp/this_file_does_not_exist_xyz123");
+    assert!(matches!(super::kube::check_local_cert_expiry(path), super::kube::CertStatus::Unknown));
+}
+
+#[test]
+fn test_cert_expiry_no_field() {
+    // Valid YAML but no certificate-expires-at field
+    let content = r#"
+apiVersion: v1
+kind: Config
+current-context: test
+clusters: []
+contexts: []
+users: []
+"#;
+    let mut file = NamedTempFile::new().unwrap();
+    file.write_all(content.as_bytes()).unwrap();
+    let result = super::kube::check_local_cert_expiry(file.path());
+    assert!(matches!(result, super::kube::CertStatus::Unknown));
+}
+
+#[test]
+fn test_cert_expiry_expired() {
+    let content = r#"
+apiVersion: v1
+kind: Config
+current-context: test
+clusters: []
+contexts: []
+users: []
+preferences:
+  certificate-expires-at: "1970-01-01T00:00:00+00:00"
+"#;
+    let mut file = NamedTempFile::new().unwrap();
+    file.write_all(content.as_bytes()).unwrap();
+    let result = super::kube::check_local_cert_expiry(file.path());
+    assert!(matches!(result, super::kube::CertStatus::Expired));
+}
+
+#[test]
+fn test_cert_expiry_valid() {
+    let content = r#"
+apiVersion: v1
+kind: Config
+current-context: test
+clusters: []
+contexts: []
+users: []
+preferences:
+  certificate-expires-at: "2099-01-01T00:00:00+00:00"
+"#;
+    let mut file = NamedTempFile::new().unwrap();
+    file.write_all(content.as_bytes()).unwrap();
+    let result = super::kube::check_local_cert_expiry(file.path());
+    assert!(matches!(result, super::kube::CertStatus::Valid(_)));
+}
+
+#[test]
+fn test_cert_expiry_bad_date() {
+    let content = r#"
+apiVersion: v1
+kind: Config
+current-context: test
+clusters: []
+contexts: []
+users: []
+preferences:
+  certificate-expires-at: "not-a-valid-date"
+"#;
+    let mut file = NamedTempFile::new().unwrap();
+    file.write_all(content.as_bytes()).unwrap();
+    let result = super::kube::check_local_cert_expiry(file.path());
+    assert!(matches!(result, super::kube::CertStatus::Unknown));
+}
+
+// ---------------------------------------------------------------------------
+// Helpers for merge_into_main_kubeconfig tests
+// ---------------------------------------------------------------------------
+
+fn make_kubeconfig_yaml(context_name: &str, server_ip: &str) -> String {
+    format!(
+        r#"apiVersion: v1
+kind: Config
+current-context: {context_name}
+clusters:
+- name: {context_name}
+  cluster:
+    server: https://{server_ip}:6443
+    certificate-authority-data: FAKECERT
+contexts:
+- name: {context_name}
+  context:
+    cluster: {context_name}
+    user: {context_name}-user
+users:
+- name: {context_name}-user
+  user:
+    client-certificate-data: FAKECERT
+    client-key-data: FAKEKEY
+"#
+    )
+}
+
+fn write_fetched_file(dir: &TempDir, context_name: &str, server_ip: &str) -> PathBuf {
+    let path = dir.path().join("fetched_kubeconfig");
+    fs::write(&path, make_kubeconfig_yaml(context_name, server_ip)).unwrap();
+    path
+}
+
+fn main_kubeconfig_path() -> PathBuf {
+    dirs::home_dir()
+        .expect("home dir must exist")
+        .join(".kube")
+        .join("config")
+}
+
+/// Remove entries matching `context_name` from ~/.kube/config after a test.
+/// Operates on clusters, contexts, and users. Does nothing if the file does not exist.
+fn cleanup_test_context(context_name: &str) {
+    let path = main_kubeconfig_path();
+    if !path.exists() {
+        return;
+    }
+    let content = fs::read_to_string(&path).unwrap();
+    let mut config: KubeConfig = match serde_yaml::from_str(&content) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let user_name = format!("{}-user", context_name);
+    config.clusters.retain(|c| c.name != context_name);
+    config.contexts.retain(|c| c.name != context_name);
+    config.users.retain(|u| u.name != user_name);
+    let updated = serde_yaml::to_string(&config).unwrap();
+    fs::write(&path, updated).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_merge_dry_run() {
+    let _kube_guard = KUBE_CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let context_name = "test-merge-DONOTKEEP-dryrun";
+    let temp_dir = Builder::new().prefix("test_merge_dry_run").tempdir().unwrap();
+    let fetched_path = write_fetched_file(&temp_dir, context_name, "10.99.0.1");
+
+    let main_path = main_kubeconfig_path();
+    let content_before = if main_path.exists() {
+        fs::read_to_string(&main_path).ok()
+    } else {
+        None
+    };
+    let mtime_before = main_path.metadata().ok().and_then(|m| m.modified().ok());
+
+    let result = merge_into_main_kubeconfig(&fetched_path, "test-server-dryrun", true);
+    assert!(result.is_ok(), "dry_run merge returned error: {:?}", result);
+
+    // File must not have been modified
+    if let Some(before) = content_before {
+        let content_after = fs::read_to_string(&main_path).unwrap();
+        assert_eq!(before, content_after, "~/.kube/config was modified by a dry_run call");
+    }
+    // Verify mtime unchanged as a belt-and-suspenders check
+    if let Some(mtime_after) = main_path.metadata().ok().and_then(|m| m.modified().ok()) {
+        assert_eq!(
+            mtime_before.unwrap(),
+            mtime_after,
+            "~/.kube/config mtime changed during dry_run"
+        );
+    }
+}
+
+#[test]
+fn test_merge_no_preferences_copied() {
+    let _kube_guard = KUBE_CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let context_name = "test-merge-DONOTKEEP-noprefs";
+    let temp_dir = Builder::new().prefix("test_merge_noprefs").tempdir().unwrap();
+
+    // Fetched file has preferences set
+    let yaml = format!(
+        r#"apiVersion: v1
+kind: Config
+current-context: {context_name}
+clusters:
+- name: {context_name}
+  cluster:
+    server: https://10.99.0.2:6443
+    certificate-authority-data: FAKECERT
+contexts:
+- name: {context_name}
+  context:
+    cluster: {context_name}
+    user: {context_name}-user
+users:
+- name: {context_name}-user
+  user:
+    client-certificate-data: FAKECERT
+    client-key-data: FAKEKEY
+preferences:
+  certificate-expires-at: "2099-01-01T00:00:00+00:00"
+  source-file-sha256: "deadbeef"
+"#
+    );
+    let fetched_path = temp_dir.path().join("fetched_kubeconfig");
+    fs::write(&fetched_path, &yaml).unwrap();
+
+    let result = merge_into_main_kubeconfig(&fetched_path, "test-server-noprefs", false);
+    assert!(result.is_ok(), "merge returned error: {:?}", result);
+
+    let main_path = main_kubeconfig_path();
+    let content = fs::read_to_string(&main_path).unwrap();
+    let main_config: KubeConfig = serde_yaml::from_str(&content).unwrap();
+
+    // The main config's preferences must not contain the source's preference keys
+    if let Some(prefs) = &main_config.preferences {
+        assert!(
+            !prefs.contains_key("certificate-expires-at") || {
+                // If the main config already had this key before the test, that is fine.
+                // We only care that the value from the fetched file ("2099-01-01") was not injected.
+                prefs
+                    .get("certificate-expires-at")
+                    .and_then(|v| v.as_str())
+                    .map(|s| !s.starts_with("2099"))
+                    .unwrap_or(true)
+            },
+            "certificate-expires-at from fetched file was incorrectly merged into main config"
+        );
+    }
+
+    cleanup_test_context(context_name);
+}
+
+#[test]
+fn test_merge_replaces_existing() {
+    let _kube_guard = KUBE_CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let context_name = "test-merge-DONOTKEEP-replace";
+    let temp_dir = Builder::new().prefix("test_merge_replace").tempdir().unwrap();
+
+    // First merge with IP A
+    let fetched_path = write_fetched_file(&temp_dir, context_name, "10.99.0.10");
+    merge_into_main_kubeconfig(&fetched_path, "test-server-replace", false).unwrap();
+
+    // Second merge with IP B (overwrite)
+    let fetched_path2 = {
+        let p = temp_dir.path().join("fetched_v2");
+        fs::write(&p, make_kubeconfig_yaml(context_name, "10.99.0.20")).unwrap();
+        p
+    };
+    merge_into_main_kubeconfig(&fetched_path2, "test-server-replace", false).unwrap();
+
+    let main_path = main_kubeconfig_path();
+    let content = fs::read_to_string(&main_path).unwrap();
+    let main_config: KubeConfig = serde_yaml::from_str(&content).unwrap();
+
+    // Only one cluster entry for this context name
+    let matching_clusters: Vec<_> = main_config
+        .clusters
+        .iter()
+        .filter(|c| c.name == context_name)
+        .collect();
+    assert_eq!(
+        matching_clusters.len(),
+        1,
+        "expected exactly 1 cluster named '{}', got {}",
+        context_name,
+        matching_clusters.len()
+    );
+    assert_eq!(
+        matching_clusters[0].cluster.server,
+        "https://10.99.0.20:6443",
+        "cluster server was not replaced with the second IP"
+    );
+
+    // Only one context entry
+    let matching_contexts: Vec<_> = main_config
+        .contexts
+        .iter()
+        .filter(|c| c.name == context_name)
+        .collect();
+    assert_eq!(
+        matching_contexts.len(),
+        1,
+        "expected exactly 1 context named '{}'",
+        context_name
+    );
+
+    cleanup_test_context(context_name);
+}
+
+#[test]
+fn test_merge_preserves_other_contexts() {
+    let _kube_guard = KUBE_CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let context_name = "test-merge-DONOTKEEP-preserve";
+    let temp_dir = Builder::new().prefix("test_merge_preserve").tempdir().unwrap();
+
+    let main_path = main_kubeconfig_path();
+    let contexts_before: usize = if main_path.exists() {
+        let content = fs::read_to_string(&main_path).unwrap();
+        let config: KubeConfig = serde_yaml::from_str(&content).unwrap();
+        config.contexts.len()
+    } else {
+        0
+    };
+
+    let fetched_path = write_fetched_file(&temp_dir, context_name, "10.99.0.30");
+    merge_into_main_kubeconfig(&fetched_path, "test-server-preserve", false).unwrap();
+
+    let content_after = fs::read_to_string(&main_path).unwrap();
+    let config_after: KubeConfig = serde_yaml::from_str(&content_after).unwrap();
+    let contexts_after = config_after.contexts.len();
+
+    // We added exactly one new context
+    assert_eq!(
+        contexts_after,
+        contexts_before + 1,
+        "expected {} contexts after merge, got {}",
+        contexts_before + 1,
+        contexts_after
+    );
+
+    // The new context is present
+    assert!(
+        config_after.contexts.iter().any(|c| c.name == context_name),
+        "merged context '{}' not found in main config",
+        context_name
+    );
+
+    cleanup_test_context(context_name);
+}
+
+#[test]
+fn test_merge_dry_run_nonexistent_fetched_returns_ok() {
+    // In dry-run mode, a non-existent fetched file is fine — the real run
+    // would have written it first. The function should return Ok and log.
+    let result = merge_into_main_kubeconfig(
+        std::path::Path::new("/tmp/this_does_not_exist_kube_test_xyz"),
+        "test-server-nonexistent",
+        true,
+    );
+    assert!(result.is_ok(), "expected Ok for missing fetched file in dry-run, got: {:?}", result.err());
+}
+
+#[test]
+fn test_merge_non_dry_run_returns_err_for_nonexistent_fetched() {
+    // Outside dry-run, a missing fetched file is a real error.
+    let result = merge_into_main_kubeconfig(
+        std::path::Path::new("/tmp/this_does_not_exist_kube_test_xyz"),
+        "test-server-nonexistent",
+        false,
+    );
+    assert!(result.is_err(), "expected Err for missing fetched file in real run, got Ok");
+}
+
+#[test]
+fn test_merge_dry_run_valid_file_leaves_main_unchanged() {
+    let _kube_guard = KUBE_CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let context_name = "test-merge-DONOTKEEP-dryrun2";
+    let temp_dir = Builder::new().prefix("test_merge_dryrun2").tempdir().unwrap();
+    let fetched_path = write_fetched_file(&temp_dir, context_name, "10.99.0.99");
+
+    let main_path = main_kubeconfig_path();
+    let content_before = if main_path.exists() {
+        Some(fs::read_to_string(&main_path).unwrap())
+    } else {
+        None
+    };
+
+    let result = merge_into_main_kubeconfig(&fetched_path, "test-server-dryrun2", true);
+    assert!(result.is_ok(), "dry_run merge returned error: {:?}", result);
+
+    // Main config content must be byte-for-byte identical
+    if let Some(before) = content_before {
+        let after = fs::read_to_string(&main_path).unwrap();
+        assert_eq!(
+            before, after,
+            "~/.kube/config was modified by second dry_run call"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// process_server early-return tests
+// ---------------------------------------------------------------------------
+
+/// When a locally cached kubeconfig has a future certificate-expires-at,
+/// process_server must return Skipped(CertValid) without opening any SSH connection.
+#[test]
+fn test_process_server_cert_valid_skips_ssh() {
+    use super::{process_server, ServerResult, SkipReason};
+
+    let temp_dir = Builder::new()
+        .prefix("test_proc_srv_cert_valid")
+        .tempdir()
+        .unwrap();
+
+    let server_name = "test-proc-cert-valid";
+
+    // Write a cached kubeconfig whose cert expires far in the future
+    let local_path = temp_dir.path().join(server_name);
+    fs::write(
+        &local_path,
+        r#"apiVersion: v1
+kind: Config
+current-context: test-ctx
+clusters:
+- name: test-ctx
+  cluster:
+    server: https://10.0.0.1:6443
+    certificate-authority-data: FAKECERT
+contexts:
+- name: test-ctx
+  context:
+    cluster: test-ctx
+    user: test-user
+users:
+- name: test-user
+  user:
+    client-certificate-data: FAKECERT
+    client-key-data: FAKEKEY
+preferences:
+  certificate-expires-at: "2099-01-01T00:00:00+00:00"
+"#,
+    )
+    .unwrap();
+
+    let server = Server {
+        name: server_name.to_string(),
+        // RFC 5737 TEST-NET — guaranteed unreachable, so any SSH attempt would fail
+        address: "192.0.2.1".to_string(),
+        target_cluster_ip: "10.0.0.1".to_string(),
+        user: Some("testuser".to_string()),
+        file_path: Some("/etc/kubernetes".to_string()),
+        file_name: Some("admin.conf".to_string()),
+        context_name: None,
+        identity_file: None,
+    };
+
+    let cfg = Config {
+        default_user: None,
+        default_file_path: None,
+        default_file_name: None,
+        default_identity_file: None,
+        local_output_dir: temp_dir.path().to_string_lossy().into_owned(),
+        servers: vec![],
+    };
+
+    let result = process_server(&server, &cfg, false);
+    assert!(result.is_ok(), "expected Ok, got Err: {:?}", result.err());
+    assert!(
+        matches!(result.unwrap(), ServerResult::Skipped(SkipReason::CertValid(_))),
+        "expected Skipped(CertValid), got something else"
+    );
 }

@@ -4,9 +4,10 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use x509_parser::prelude::parse_x509_pem;
+use dirs;
 
 /// Represents the top-level structure of a Kubernetes config file.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KubeConfig {
     /// The API version of the kubeconfig file format.
     #[serde(rename = "apiVersion")]
@@ -27,8 +28,53 @@ pub struct KubeConfig {
     pub preferences: Option<IndexMap<String, serde_yaml::Value>>,
 }
 
+/// Represents the validity state of a locally cached certificate.
+#[derive(Debug)]
+pub enum CertStatus {
+    /// Cert is still valid — no action needed
+    Valid(chrono::DateTime<chrono::Utc>),
+    /// Cert is expired — fetch needed
+    Expired,
+    /// No local file, missing field, parse error — treat as unknown, fetch to be safe
+    Unknown,
+}
+
+/// Checks the local cached kubeconfig to determine if the certificate is still valid.
+/// Returns CertStatus::Unknown when the answer cannot be determined (missing file,
+/// missing field, parse error) — callers should treat Unknown as "needs fetch".
+pub fn check_local_cert_expiry(path: &std::path::Path) -> CertStatus {
+    if !path.exists() {
+        return CertStatus::Unknown;
+    }
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return CertStatus::Unknown,
+    };
+    let kubeconfig: KubeConfig = match serde_yaml::from_str(&content) {
+        Ok(k) => k,
+        Err(_) => return CertStatus::Unknown,
+    };
+    let prefs = match kubeconfig.preferences {
+        Some(p) => p,
+        None => return CertStatus::Unknown,
+    };
+    let expiry_str = match prefs.get("certificate-expires-at").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return CertStatus::Unknown,
+    };
+    let expiry = match chrono::DateTime::parse_from_rfc3339(&expiry_str) {
+        Ok(dt) => dt.with_timezone(&chrono::Utc),
+        Err(_) => return CertStatus::Unknown,
+    };
+    if expiry <= chrono::Utc::now() {
+        CertStatus::Expired
+    } else {
+        CertStatus::Valid(expiry)
+    }
+}
+
 /// A named cluster entry in the kubeconfig.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClusterInfo {
     /// The name of the cluster.
     pub name: String,
@@ -37,7 +83,7 @@ pub struct ClusterInfo {
 }
 
 /// Contains the connection details for a Kubernetes cluster.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Cluster {
     /// The URL of the Kubernetes API server.
     pub server: String,
@@ -47,7 +93,7 @@ pub struct Cluster {
 }
 
 /// A named context entry in the kubeconfig.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextInfo {
     /// The name of the context.
     pub name: String,
@@ -56,7 +102,7 @@ pub struct ContextInfo {
 }
 
 /// Defines a context by linking a cluster, a user, and an optional namespace.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Context {
     /// The name of the user for this context.
     pub user: String,
@@ -65,7 +111,7 @@ pub struct Context {
 }
 
 /// A named user entry in the kubeconfig.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserInfo {
     /// The name of the user.
     pub name: String,
@@ -74,7 +120,7 @@ pub struct UserInfo {
 }
 
 /// Contains the authentication credentials for a user.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
     /// The base64-encoded client certificate data.
     #[serde(rename = "client-certificate-data")]
@@ -97,19 +143,26 @@ fn add_last_updated_timestamp(kubeconfig: &mut KubeConfig) -> Result<(), anyhow:
 
 /// Parses the client certificate to find its expiration date and adds it to the preferences.
 fn add_cert_expiration(kubeconfig: &mut KubeConfig) -> Result<(), anyhow::Error> {
-    let user_name = &kubeconfig
+    let Some(context_entry) = kubeconfig
         .contexts
         .iter()
         .find(|c| c.name == kubeconfig.current_context)
-        .ok_or_else(|| anyhow::anyhow!("Could not find user for context '{}'", kubeconfig.current_context))?
-        .context
-        .user;
+    else {
+        log::warn!(
+            "Could not find context '{}' to extract cert expiry — skipping",
+            kubeconfig.current_context
+        );
+        return Ok(());
+    };
+    let user_name = &context_entry.context.user;
 
-    let user_info = kubeconfig
-        .users
-        .iter()
-        .find(|u| u.name == *user_name)
-        .ok_or_else(|| anyhow::anyhow!("Could not find user info for user '{}'", user_name))?;
+    let Some(user_info) = kubeconfig.users.iter().find(|u| u.name == *user_name) else {
+        log::warn!(
+            "Could not find user '{}' to extract cert expiry — skipping",
+            user_name
+        );
+        return Ok(());
+    };
 
     let pem_data = general_purpose::STANDARD.decode(&user_info.user.certificate_data)?;
     match parse_x509_pem(&pem_data) {
@@ -155,8 +208,9 @@ fn add_metadata(kubeconfig: &mut KubeConfig, source_hash: &str) -> Result<(), an
     Ok(())
 }
 
-/// Updates the cluster's server URL to point to the new target IP address.
-fn update_cluster_info(kubeconfig: &mut KubeConfig, target_ip: &str) -> Result<(), anyhow::Error> {
+/// Updates the cluster's server URL and renames the cluster entry to `unique_name`
+/// so that each server's cluster is independently addressable after merging.
+fn update_cluster_info(kubeconfig: &mut KubeConfig, target_ip: &str, unique_name: &str) -> Result<(), anyhow::Error> {
     if let Some(cluster_info) = kubeconfig.clusters.get_mut(0) {
         log::info!(
             "Updating cluster '{}' server from '{}' to 'https://{}:6443'",
@@ -165,28 +219,33 @@ fn update_cluster_info(kubeconfig: &mut KubeConfig, target_ip: &str) -> Result<(
             target_ip
         );
         cluster_info.cluster.server = format!("https://{}:6443", target_ip);
+        cluster_info.name = unique_name.to_string();
     } else {
-        anyhow::bail!("No clusters found in the kubeonfig file.")
+        anyhow::bail!("No clusters found in the kubeconfig file.")
     }
 
     Ok(())
 }
 
-/// Updates the context name and sets the `current-context` field if a target context is provided.
-fn update_context_info(kubeconfig: &mut KubeConfig, target_context: &Option<String>) -> Result<(), anyhow::Error> {
-    if let Some(context) = target_context {
-        if let Some(context_info) = kubeconfig.contexts.get_mut(0) {
-            log::info!("Updating context name from '{}' to '{}'", context_info.name, context);
-            context_info.name = context.to_string();
-        } else {
-            anyhow::bail!("No contexts found in the kubeconfig file.");
-        }
-
-        log::info!("Setting current-context to '{}'", context);
-        kubeconfig.current_context = context.to_string();
-    } else {
-        log::debug!("Leaving default context")
+/// Renames the context, user, and all cross-references to `unique_name` so that
+/// multiple servers whose k3s configs all default to "default" can coexist in
+/// a merged ~/.kube/config without overwriting each other's entries.
+fn update_context_info(kubeconfig: &mut KubeConfig, unique_name: &str) -> Result<(), anyhow::Error> {
+    if let Some(user) = kubeconfig.users.get_mut(0) {
+        user.name = unique_name.to_string();
     }
+
+    if let Some(context_info) = kubeconfig.contexts.get_mut(0) {
+        log::info!("Updating context name from '{}' to '{}'", context_info.name, unique_name);
+        context_info.name = unique_name.to_string();
+        context_info.context.cluster = unique_name.to_string();
+        context_info.context.user = unique_name.to_string();
+    } else {
+        anyhow::bail!("No contexts found in the kubeconfig file.");
+    }
+
+    log::info!("Setting current-context to '{}'", unique_name);
+    kubeconfig.current_context = unique_name.to_string();
 
     Ok(())
 }
@@ -200,6 +259,7 @@ pub fn process_kubeconfig_file(
     target_ip: &str,
     source_hash: &str,
     target_context: &Option<String>,
+    server_name: &str,
     dry_run: bool,
 ) -> Result<(), anyhow::Error> {
     log::debug!("Processing file {:?}...", local_path);
@@ -220,12 +280,22 @@ pub fn process_kubeconfig_file(
         }
     }
 
+    if dry_run && !local_path.exists() {
+        log::info!(
+            "DRY-RUN: No local file at {:?} — skipping kubeconfig processing (would write on a real run)",
+            local_path
+        );
+        return Ok(());
+    }
+
     let content = fs::read_to_string(local_path)?;
     let mut kubeconfig: KubeConfig = serde_yaml::from_str(&content)?;
 
+    let unique_name = target_context.as_deref().unwrap_or(server_name);
+
     add_metadata(&mut kubeconfig, source_hash)?;
-    update_cluster_info(&mut kubeconfig, target_ip)?;
-    update_context_info(&mut kubeconfig, target_context)?;
+    update_cluster_info(&mut kubeconfig, target_ip, unique_name)?;
+    update_context_info(&mut kubeconfig, unique_name)?;
 
     let updated_content = serde_yaml::to_string(&kubeconfig)?;
 
@@ -239,6 +309,79 @@ pub fn process_kubeconfig_file(
     } else {
         fs::write(local_path, updated_content)?;
         log::info!("Successfully updated and saved kubeconfig file");
+    }
+
+    Ok(())
+}
+
+/// Merges cluster, context, and user entries from a fetched per-server kubeconfig
+/// into the main ~/.kube/config file. Existing entries with the same name are replaced.
+/// Preferences and current_context in the main config are never modified.
+pub fn merge_into_main_kubeconfig(
+    fetched_path: &Path,
+    server_name: &str,
+    dry_run: bool,
+) -> Result<(), anyhow::Error> {
+    if dry_run && !fetched_path.exists() {
+        log::info!(
+            "[{}] DRY-RUN: Would merge processed config into ~/.kube/config",
+            server_name
+        );
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(fetched_path)?;
+    let fetched: KubeConfig = serde_yaml::from_str(&content)?;
+
+    let main_config_path = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
+        .join(".kube")
+        .join("config");
+
+    let mut main_config = if main_config_path.exists() {
+        let main_content = fs::read_to_string(&main_config_path)?;
+        serde_yaml::from_str::<KubeConfig>(&main_content)?
+    } else {
+        KubeConfig {
+            api_version: "v1".to_string(),
+            kind: "Config".to_string(),
+            current_context: String::new(),
+            clusters: Vec::new(),
+            contexts: Vec::new(),
+            users: Vec::new(),
+            preferences: None,
+        }
+    };
+
+    // Upsert clusters
+    for cluster in &fetched.clusters {
+        main_config.clusters.retain(|c| c.name != cluster.name);
+        main_config.clusters.push(cluster.clone());
+    }
+    // Upsert contexts
+    for context in &fetched.contexts {
+        main_config.contexts.retain(|c| c.name != context.name);
+        main_config.contexts.push(context.clone());
+    }
+    // Upsert users
+    for user in &fetched.users {
+        main_config.users.retain(|u| u.name != user.name);
+        main_config.users.push(user.clone());
+    }
+
+    if dry_run {
+        log::info!(
+            "[{}] DRY-RUN: Would merge {} cluster(s), {} context(s), {} user(s) into {:?}",
+            server_name,
+            fetched.clusters.len(),
+            fetched.contexts.len(),
+            fetched.users.len(),
+            main_config_path
+        );
+    } else {
+        let updated = serde_yaml::to_string(&main_config)?;
+        fs::write(&main_config_path, updated)?;
+        log::info!("[{}] Merged cluster/context/user into ~/.kube/config", server_name);
     }
 
     Ok(())
