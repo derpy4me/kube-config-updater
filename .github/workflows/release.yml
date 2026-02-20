@@ -57,7 +57,7 @@ jobs:
       - name: Ad-hoc sign (macOS)
         if: matrix.os == 'macos-14'
         run: |
-          codesign -s - --force --options runtime \
+          codesign -s - --force \
             target/${{ matrix.target }}/release/kube_config_updater
 
       - name: Rename artifact

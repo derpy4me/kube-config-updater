@@ -129,6 +129,21 @@ fn main() -> Result<(), anyhow::Error> {
         log::info!("Created configuration directory at: {}", parent.display());
     }
 
+    // On first run, write a minimal default config so the app starts cleanly
+    if !config_path.exists() {
+        let output_dir = dirs::home_dir()
+            .map(|mut p| { p.push(".kube"); p.to_string_lossy().into_owned() })
+            .unwrap_or_else(|| "/tmp/kube".to_string());
+        let template = format!(
+            "# kube_config_updater configuration\n\
+             # Run 'kube_config_updater tui' and press 'a' to add a server.\n\n\
+             local_output_dir = \"{}\"\n",
+            output_dir
+        );
+        fs::write(&config_path, &template)?;
+        log::info!("Created default configuration file at: {}", config_path.display());
+    }
+
     let config = config::load_config(config_path.to_str().unwrap_or_default())?;
     log::info!("Found {} servers in config", config.servers.len());
 
