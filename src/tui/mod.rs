@@ -1,0 +1,373 @@
+use std::sync::mpsc;
+use std::time::Duration;
+
+use crate::config::Config;
+use crate::state;
+
+pub mod app;
+pub mod features;
+
+use app::{AppEvent, AppState, ProbeState, View};
+
+pub fn run_tui(config: Config, config_path: std::path::PathBuf, dry_run: bool) -> anyhow::Result<()> {
+    // Load initial state from file
+    let server_states = state::read_state().unwrap_or_default();
+
+    // Initialize app state
+    let mut app = AppState::new(config, config_path.clone(), server_states, dry_run);
+    app.refresh_cert_cache();
+
+    // Auto-select first row so the user doesn't have to press j before Enter works
+    if !app.config.servers.is_empty() {
+        app.table_state.select(Some(0));
+    }
+
+    // Set up event channel
+    let (tx, rx) = mpsc::channel::<AppEvent>();
+
+    // Spawn crossterm event thread
+    let tx_events = tx.clone();
+    std::thread::spawn(move || {
+        loop {
+            match crossterm::event::read() {
+                Ok(crossterm::event::Event::Key(k)) => {
+                    if tx_events.send(AppEvent::Key(k)).is_err() { break; }
+                }
+                Ok(crossterm::event::Event::Resize(w, h)) => {
+                    if tx_events.send(AppEvent::Resize(w, h)).is_err() { break; }
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Spawn tick thread (100ms)
+    let tx_tick = tx.clone();
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_millis(100));
+            if tx_tick.send(AppEvent::Tick).is_err() { break; }
+        }
+    });
+
+    // Spawn state file watcher (2s mtime poll)
+    let tx_watcher = tx.clone();
+    std::thread::spawn(move || {
+        let path = std::path::Path::new(state::STATE_FILE);
+        let mut last_mtime: Option<std::time::SystemTime> = None;
+        loop {
+            std::thread::sleep(Duration::from_secs(2));
+            if let Ok(meta) = std::fs::metadata(path)
+                && let Ok(mtime) = meta.modified()
+                && last_mtime.map(|m| m != mtime).unwrap_or(true)
+            {
+                last_mtime = Some(mtime);
+                if tx_watcher.send(AppEvent::StateFileChanged).is_err() { break; }
+            }
+        }
+    });
+
+    // Initialize terminal
+    let mut terminal = ratatui::init();
+
+    // Run event loop
+    let result = event_loop(&mut terminal, &mut app, &rx, &tx);
+
+    // Always restore terminal
+    ratatui::restore();
+
+    result
+}
+
+pub(crate) fn spawn_fetch(
+    server: crate::config::Server,
+    config: crate::config::Config,
+    dry_run: bool,
+    force: bool,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || {
+        let result = crate::fetch::process_server(&server, &config, dry_run, force)
+            .map(|_| ())
+            .map_err(|e| friendly_error(&e));
+        tx.send(AppEvent::FetchComplete {
+            server_name: server.name,
+            result,
+        })
+        .ok();
+    });
+}
+
+/// Build a fetch completion notification that shows whether the cert changed.
+fn build_fetch_notification(
+    server_name: &str,
+    pre_expiry: Option<Option<chrono::DateTime<chrono::Utc>>>,
+    new_expiry: Option<chrono::DateTime<chrono::Utc>>,
+    success: bool,
+) -> String {
+    if !success {
+        return format!("{}: fetch failed", server_name);
+    }
+    let now = chrono::Utc::now();
+    match new_expiry {
+        None => format!("{}: fetched", server_name),
+        Some(exp) if exp <= now => {
+            format!("{}: fetched — cert expired {} (renew on server)", server_name, exp.format("%Y-%m-%d"))
+        }
+        Some(exp) => {
+            let prev_was_expired = pre_expiry.flatten().map(|pre| pre <= now).unwrap_or(false);
+            if prev_was_expired {
+                format!("{}: cert renewed → {}", server_name, exp.format("%Y-%m-%d"))
+            } else {
+                format!("{}: fetched, cert expires {}", server_name, exp.format("%Y-%m-%d"))
+            }
+        }
+    }
+}
+
+fn event_loop(
+    terminal: &mut ratatui::DefaultTerminal,
+    app: &mut AppState,
+    rx: &mpsc::Receiver<AppEvent>,
+    tx: &mpsc::Sender<AppEvent>,
+) -> anyhow::Result<()> {
+    loop {
+        // Render
+        terminal.draw(|frame| render_app(frame, app))?;
+
+        // Process next event
+        match rx.recv() {
+            Ok(AppEvent::Key(key)) => {
+                if handle_key(app, key, tx, terminal) {
+                    break; // quit
+                }
+            }
+            Ok(AppEvent::Resize(_, _)) => {
+                // ratatui handles resize automatically on next draw
+            }
+            Ok(AppEvent::Tick) => {
+                app.spinner.tick();
+                app.flash_rows.retain(|_, v| { *v = v.saturating_sub(1); *v > 0 });
+                if let Some((_, ts)) = &app.notification
+                    && ts.elapsed() > Duration::from_secs(3)
+                {
+                    app.notification = None;
+                }
+                // Skip redraw if nothing needs animating
+                let probe_active = app.probe.as_ref()
+                    .map(|(_, s)| matches!(s, ProbeState::Probing))
+                    .unwrap_or(false);
+                if app.in_progress.is_empty()
+                    && app.flash_rows.is_empty()
+                    && app.notification.is_none()
+                    && !probe_active
+                {
+                    continue;
+                }
+            }
+            Ok(AppEvent::ProbeComplete { server_name, result }) => {
+                let probe_state = match result {
+                    Ok(expiry) => ProbeState::Done(expiry),
+                    Err(msg) => ProbeState::Failed(msg),
+                };
+                app.probe = Some((server_name, probe_state));
+            }
+            Ok(AppEvent::FetchComplete { server_name, result }) => {
+                app.in_progress.remove(&server_name);
+                if server_name != "__wizard__" {
+                    let run_state = match &result {
+                        Ok(()) => state::ServerRunState {
+                            status: state::RunStatus::Fetched,
+                            last_updated: Some(chrono::Utc::now()),
+                            error: None,
+                        },
+                        Err(msg) => {
+                            let status = if msg.to_lowercase().contains("password rejected")
+                                || msg.to_lowercase().contains("authentication")
+                            {
+                                state::RunStatus::AuthRejected
+                            } else {
+                                state::RunStatus::Failed
+                            };
+                            state::ServerRunState {
+                                status,
+                                last_updated: Some(chrono::Utc::now()),
+                                error: Some(msg.clone()),
+                            }
+                        }
+                    };
+                    // Refresh cert cache directly from the kube file
+                    let mut local_path = std::path::PathBuf::from(&app.config.local_output_dir);
+                    local_path.push(&server_name);
+                    let new_expiry = match crate::kube::check_local_cert_expiry(&local_path) {
+                        crate::kube::CertStatus::Valid(exp) | crate::kube::CertStatus::Expired(exp) => Some(exp),
+                        _ => None,
+                    };
+                    app.cert_cache.insert(server_name.clone(), new_expiry);
+                    // Build delta notification before consuming pre_fetch_expiry
+                    let pre = app.pre_fetch_expiry.remove(&server_name);
+                    let notif = build_fetch_notification(&server_name, pre, new_expiry, result.is_ok());
+                    app.flash_rows.insert(server_name.clone(), 3);
+                    app.server_states.insert(server_name.clone(), run_state.clone());
+                    app.notification = Some((notif, std::time::Instant::now()));
+                    if let Err(e) = state::update_server_state(&server_name, run_state) {
+                        log::warn!("Could not write state file: {}", e);
+                    }
+                } else {
+                    // wizard test result
+                    if let View::Wizard(ws) = &mut app.view {
+                        ws.testing = false;
+                        app.in_progress.remove("__wizard__");
+                        match result {
+                            Ok(()) => {
+                                ws.test_passed = true;
+                                ws.error = None;
+                            }
+                            Err(msg) => {
+                                ws.test_passed = false;
+                                ws.error = Some(msg);
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(AppEvent::StateFileChanged) => {
+                match state::read_state() {
+                    Ok(new_states) => {
+                        app.server_states = new_states;
+                        app.refresh_cert_cache();
+                        app.notification = Some(("State refreshed".to_string(), std::time::Instant::now()));
+                    }
+                    Err(_) => {
+                        app.notification = Some(("State file unreadable — showing cached data".to_string(), std::time::Instant::now()));
+                    }
+                }
+            }
+            Err(_) => break, // channel closed
+        }
+    }
+    Ok(())
+}
+
+fn render_app(frame: &mut ratatui::Frame, app: &mut AppState) {
+    // Extract a discriminant so we don't hold a borrow on app.view while calling
+    // render functions that need &mut AppState.
+    enum ViewKind {
+        Dashboard,
+        Detail(String),
+        Wizard,
+        Help,
+        ErrorView(String),
+        CredentialMenu(String),
+        CredentialInput(String),
+        DeleteConfirm(String),
+    }
+
+    let kind = match &app.view {
+        View::Dashboard => ViewKind::Dashboard,
+        View::Detail(name) => ViewKind::Detail(name.clone()),
+        View::Wizard(_) => ViewKind::Wizard,
+        View::Help => ViewKind::Help,
+        View::Error { message, .. } => ViewKind::ErrorView(message.clone()),
+        View::CredentialMenu(name) => ViewKind::CredentialMenu(name.clone()),
+        View::CredentialInput(name) => ViewKind::CredentialInput(name.clone()),
+        View::DeleteConfirm(name) => ViewKind::DeleteConfirm(name.clone()),
+    };
+
+    match kind {
+        ViewKind::Dashboard => features::dashboard::render(frame, app),
+        ViewKind::Detail(name) => features::detail::render(frame, app, &name),
+        ViewKind::Wizard => {
+            let ws = match &app.view {
+                View::Wizard(ws) => ws.clone(),
+                _ => unreachable!(),
+            };
+            features::wizard::render(frame, app, &ws);
+        }
+        ViewKind::Help => {
+            features::dashboard::render(frame, app);
+            features::help::render(frame, app);
+        }
+        ViewKind::ErrorView(message) => {
+            features::dashboard::render(frame, app);
+            features::render_dim_background(frame, frame.area());
+            features::dashboard::render_error_overlay(frame, &message);
+        }
+        ViewKind::CredentialMenu(name) => {
+            features::dashboard::render(frame, app);
+            features::render_dim_background(frame, frame.area());
+            features::credentials::render_menu(frame, app, &name);
+        }
+        ViewKind::CredentialInput(name) => {
+            features::dashboard::render(frame, app);
+            features::render_dim_background(frame, frame.area());
+            features::credentials::render_input(frame, app, &name);
+        }
+        ViewKind::DeleteConfirm(name) => {
+            features::dashboard::render(frame, app);
+            features::render_dim_background(frame, frame.area());
+            features::dashboard::render_delete_confirm(frame, app, &name);
+        }
+    }
+}
+
+fn handle_key(
+    app: &mut AppState,
+    key: crossterm::event::KeyEvent,
+    tx: &mpsc::Sender<AppEvent>,
+    terminal: &mut ratatui::DefaultTerminal,
+) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    // Global: Ctrl+C and Ctrl+D always quit regardless of the active view.
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('d'))
+    {
+        return true;
+    }
+
+    match &app.view {
+        View::Dashboard => features::dashboard::handle_key(app, key, tx, terminal),
+        View::Detail(name) => features::detail::handle_key(app, name.clone(), key, tx),
+        View::DeleteConfirm(name) => features::dashboard::handle_key_delete_confirm(app, name.clone(), key),
+        View::Help => { features::help::handle_key(app, key); false }
+        View::Error { .. } => { app.view = View::Dashboard; false }
+        View::CredentialMenu(name) => features::credentials::handle_key_menu(app, name.clone(), key),
+        View::CredentialInput(name) => features::credentials::handle_key_input(app, name.clone(), key),
+        View::Wizard(_) => features::wizard::handle_key(app, key, tx),
+    }
+}
+
+/// Map an anyhow error to a human-readable, actionable message (NFR-7).
+pub fn friendly_error(e: &anyhow::Error) -> String {
+    let s = format!("{:#}", e);
+    let lower = s.to_lowercase();
+    if lower.contains("connection refused") || lower.contains("timed out") || lower.contains("no route") {
+        if let Some(host) = extract_host(&s) {
+            return format!("Could not reach {} — is the host up and reachable from this machine?", host);
+        }
+        return "Could not reach host — is it up and reachable from this machine?".to_string();
+    }
+    if lower.contains("authentication failed") || lower.contains("auth rejected") {
+        return "Password rejected by server. Check credentials with 'c'.".to_string();
+    }
+    if lower.contains("sudo") || lower.contains("permission denied") {
+        return "Connected but couldn't read the remote file — sudo may require a password or the path may be wrong.".to_string();
+    }
+    if lower.contains("yaml") || lower.contains("parse") {
+        return "Remote file doesn't look like a kubeconfig — check the file path in config.".to_string();
+    }
+    if lower.contains("no clusters") {
+        return "Kubeconfig has no cluster entries — expected standard k3s format.".to_string();
+    }
+    if lower.contains("keyring") || lower.contains("secret service") {
+        return "OS keyring is locked or unavailable. Log in to unlock it, then retry.".to_string();
+    }
+    // Fallback: return original
+    s
+}
+
+fn extract_host(_error: &str) -> Option<String> {
+    // Simple heuristic: look for a hostname-like word after "connect" or similar
+    None // TODO: implement if needed
+}

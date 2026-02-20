@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use x509_parser::prelude::parse_x509_pem;
-use dirs;
 
 /// Represents the top-level structure of a Kubernetes config file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,8 +32,8 @@ pub struct KubeConfig {
 pub enum CertStatus {
     /// Cert is still valid — no action needed
     Valid(chrono::DateTime<chrono::Utc>),
-    /// Cert is expired — fetch needed
-    Expired,
+    /// Cert is expired — fetch needed (carries the past expiry date for display)
+    Expired(chrono::DateTime<chrono::Utc>),
     /// No local file, missing field, parse error — treat as unknown, fetch to be safe
     Unknown,
 }
@@ -67,7 +66,7 @@ pub fn check_local_cert_expiry(path: &std::path::Path) -> CertStatus {
         Err(_) => return CertStatus::Unknown,
     };
     if expiry <= chrono::Utc::now() {
-        CertStatus::Expired
+        CertStatus::Expired(expiry)
     } else {
         CertStatus::Valid(expiry)
     }
@@ -312,6 +311,27 @@ pub fn process_kubeconfig_file(
     }
 
     Ok(())
+}
+
+/// Parse the client certificate expiry directly from raw kubeconfig bytes.
+/// Used for server probing — reads the cert without writing anything locally.
+/// Returns `None` if content can't be parsed or no cert data is present.
+pub fn parse_cert_expiry_from_bytes(content: &[u8]) -> Option<chrono::DateTime<chrono::Utc>> {
+    let content_str = std::str::from_utf8(content).ok()?;
+    let kubeconfig: KubeConfig = serde_yaml::from_str(content_str).ok()?;
+
+    let context_entry = kubeconfig
+        .contexts
+        .iter()
+        .find(|c| c.name == kubeconfig.current_context)?;
+    let user_name = &context_entry.context.user;
+    let user_info = kubeconfig.users.iter().find(|u| u.name == *user_name)?;
+
+    let pem_data = general_purpose::STANDARD.decode(&user_info.user.certificate_data).ok()?;
+    let (_, pem) = parse_x509_pem(&pem_data).ok()?;
+    let cert = pem.parse_x509().ok()?;
+    let timestamp = cert.validity().not_after.to_datetime().unix_timestamp();
+    chrono::DateTime::from_timestamp(timestamp, 0)
 }
 
 /// Merges cluster, context, and user entries from a fetched per-server kubeconfig

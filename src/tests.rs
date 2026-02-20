@@ -366,7 +366,7 @@ preferences:
     let mut file = NamedTempFile::new().unwrap();
     file.write_all(content.as_bytes()).unwrap();
     let result = super::kube::check_local_cert_expiry(file.path());
-    assert!(matches!(result, super::kube::CertStatus::Expired));
+    assert!(matches!(result, super::kube::CertStatus::Expired(_)));
 }
 
 #[test]
@@ -719,7 +719,7 @@ fn test_merge_dry_run_valid_file_leaves_main_unchanged() {
 /// process_server must return Skipped(CertValid) without opening any SSH connection.
 #[test]
 fn test_process_server_cert_valid_skips_ssh() {
-    use super::{process_server, ServerResult, SkipReason};
+    use super::fetch::{process_server, ServerResult, SkipReason};
 
     let temp_dir = Builder::new()
         .prefix("test_proc_srv_cert_valid")
@@ -777,7 +777,7 @@ preferences:
         servers: vec![],
     };
 
-    let result = process_server(&server, &cfg, false);
+    let result = process_server(&server, &cfg, false, false);
     assert!(result.is_ok(), "expected Ok, got Err: {:?}", result.err());
     assert!(
         matches!(result.unwrap(), ServerResult::Skipped(SkipReason::CertValid(_))),

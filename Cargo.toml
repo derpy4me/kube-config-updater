@@ -22,6 +22,10 @@ sha2 = "0.10.9"
 ssh2 = "0.9.5"
 toml = "0.9.7"
 x509-parser = "0.18.0"
+ratatui    = "0.30"
+crossterm  = "0.29"
+serde_json = "1"
+toml_edit  = "0.25"
 
 [dev-dependencies]
 tempfile = "3.10.1"
