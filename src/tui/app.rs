@@ -36,16 +36,76 @@ pub enum ProbeState {
 #[allow(clippy::large_enum_variant)]
 pub enum View {
     Dashboard,
-    Detail(String),           // server name
+    Detail(String),              // server name
     Wizard(WizardState),
-    CredentialMenu(String),   // server name
-    CredentialInput(String),  // server name
-    DeleteConfirm(String),    // server name
+    SetupWizard(SetupWizardState),
+    CredentialMenu(String),      // server name
+    CredentialInput(String),     // server name
+    DeleteConfirm(String),       // server name
     Help,
     Error {
         message: String,
         underlying: Box<View>,
     },
+}
+
+// ─── Setup Wizard ─────────────────────────────────────────────────────────────
+
+#[derive(Clone, Default)]
+pub struct SetupWizardState {
+    pub step: SetupStep,
+    pub output_dir: String,
+    pub default_user: String,
+    pub default_file_path: String,
+    pub default_file_name: String,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Default)]
+pub enum SetupStep {
+    #[default]
+    OutputDir,
+    DefaultUser,
+    DefaultFilePath,
+    DefaultFileName,
+}
+
+impl SetupStep {
+    pub fn index(&self) -> usize {
+        match self {
+            SetupStep::OutputDir => 0,
+            SetupStep::DefaultUser => 1,
+            SetupStep::DefaultFilePath => 2,
+            SetupStep::DefaultFileName => 3,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            SetupStep::OutputDir => "Local output directory",
+            SetupStep::DefaultUser => "Default SSH user",
+            SetupStep::DefaultFilePath => "Default remote file path",
+            SetupStep::DefaultFileName => "Default remote file name",
+        }
+    }
+
+    pub fn next(&self) -> Option<SetupStep> {
+        match self {
+            SetupStep::OutputDir => Some(SetupStep::DefaultUser),
+            SetupStep::DefaultUser => Some(SetupStep::DefaultFilePath),
+            SetupStep::DefaultFilePath => Some(SetupStep::DefaultFileName),
+            SetupStep::DefaultFileName => None,
+        }
+    }
+
+    pub fn prev(&self) -> Option<SetupStep> {
+        match self {
+            SetupStep::OutputDir => None,
+            SetupStep::DefaultUser => Some(SetupStep::OutputDir),
+            SetupStep::DefaultFilePath => Some(SetupStep::DefaultUser),
+            SetupStep::DefaultFileName => Some(SetupStep::DefaultFilePath),
+        }
+    }
 }
 
 // ─── Wizard ───────────────────────────────────────────────────────────────────

@@ -92,19 +92,29 @@ impl Server {
 /// This function will return an error if the file does not exist, cannot be read,
 /// or if the content cannot be parsed as a valid `Config` structure.
 pub fn load_config(path: &str) -> Result<Config, anyhow::Error> {
+    match load_config_optional(path)? {
+        Some(config) => Ok(config),
+        None => anyhow::bail!("Configuration file not found at '{}'. Run `kube_config_updater tui` to set up.", path),
+    }
+}
+
+/// Like `load_config` but returns `Ok(None)` when the file does not exist,
+/// and `Err` only when the file exists but is invalid.
+pub fn load_config_optional(path: &str) -> Result<Option<Config>, anyhow::Error> {
     log::debug!("Attempting to load configuration from '{}'...", path);
 
     if !Path::new(path).exists() {
-        anyhow::bail!("Configuration file not found at '{}'. Please create it.", path);
+        return Ok(None);
     }
 
     let config_content = fs::read_to_string(path)?;
     log::debug!("Successfully read config file.");
 
-    let config: Config = toml::from_str(&config_content)?;
+    let config: Config = toml::from_str(&config_content)
+        .map_err(|e| anyhow::anyhow!("Configuration file at '{}' is invalid: {}", path, e))?;
     log::debug!("Successfully parsed configuration.");
 
-    Ok(config)
+    Ok(Some(config))
 }
 
 /// Append a new [[server]] entry to config.toml, preserving existing comments and formatting.

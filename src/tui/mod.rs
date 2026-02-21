@@ -7,25 +7,43 @@ use crate::state;
 pub mod app;
 pub mod features;
 
-use app::{AppEvent, AppState, ProbeState, View};
+use app::{AppEvent, AppState, ProbeState, SetupWizardState, View};
 
 pub fn run_tui(config: Config, config_path: std::path::PathBuf, dry_run: bool) -> anyhow::Result<()> {
-    // Load initial state from file
     let server_states = state::read_state().unwrap_or_default();
-
-    // Initialize app state
-    let mut app = AppState::new(config, config_path.clone(), server_states, dry_run);
+    let mut app = AppState::new(config, config_path, server_states, dry_run);
     app.refresh_cert_cache();
-
-    // Auto-select first row so the user doesn't have to press j before Enter works
     if !app.config.servers.is_empty() {
         app.table_state.select(Some(0));
     }
+    run_app(app)
+}
 
-    // Set up event channel
+pub fn run_tui_setup(config_path: std::path::PathBuf, dry_run: bool) -> anyhow::Result<()> {
+    let empty_config = crate::config::Config {
+        default_user: None,
+        default_file_path: None,
+        default_file_name: None,
+        default_identity_file: None,
+        local_output_dir: String::new(),
+        servers: vec![],
+    };
+
+    let initial_output_dir = dirs::home_dir()
+        .map(|mut p| { p.push(".kube"); p.to_string_lossy().into_owned() })
+        .unwrap_or_else(|| String::from("/tmp/kube"));
+
+    let setup = SetupWizardState { output_dir: initial_output_dir, ..Default::default() };
+
+    let mut app = AppState::new(empty_config, config_path, std::collections::HashMap::new(), dry_run);
+    app.view = View::SetupWizard(setup);
+
+    run_app(app)
+}
+
+fn run_app(mut app: AppState) -> anyhow::Result<()> {
     let (tx, rx) = mpsc::channel::<AppEvent>();
 
-    // Spawn crossterm event thread
     let tx_events = tx.clone();
     std::thread::spawn(move || {
         loop {
@@ -41,7 +59,6 @@ pub fn run_tui(config: Config, config_path: std::path::PathBuf, dry_run: bool) -
         }
     });
 
-    // Spawn tick thread (100ms)
     let tx_tick = tx.clone();
     std::thread::spawn(move || {
         loop {
@@ -50,7 +67,6 @@ pub fn run_tui(config: Config, config_path: std::path::PathBuf, dry_run: bool) -
         }
     });
 
-    // Spawn state file watcher (2s mtime poll)
     let tx_watcher = tx.clone();
     std::thread::spawn(move || {
         let path = std::path::Path::new(state::STATE_FILE);
@@ -67,15 +83,9 @@ pub fn run_tui(config: Config, config_path: std::path::PathBuf, dry_run: bool) -
         }
     });
 
-    // Initialize terminal
     let mut terminal = ratatui::init();
-
-    // Run event loop
     let result = event_loop(&mut terminal, &mut app, &rx, &tx);
-
-    // Always restore terminal
     ratatui::restore();
-
     result
 }
 
@@ -256,6 +266,7 @@ fn render_app(frame: &mut ratatui::Frame, app: &mut AppState) {
         Dashboard,
         Detail(String),
         Wizard,
+        SetupWizard,
         Help,
         ErrorView(String),
         CredentialMenu(String),
@@ -267,6 +278,7 @@ fn render_app(frame: &mut ratatui::Frame, app: &mut AppState) {
         View::Dashboard => ViewKind::Dashboard,
         View::Detail(name) => ViewKind::Detail(name.clone()),
         View::Wizard(_) => ViewKind::Wizard,
+        View::SetupWizard(_) => ViewKind::SetupWizard,
         View::Help => ViewKind::Help,
         View::Error { message, .. } => ViewKind::ErrorView(message.clone()),
         View::CredentialMenu(name) => ViewKind::CredentialMenu(name.clone()),
@@ -283,6 +295,13 @@ fn render_app(frame: &mut ratatui::Frame, app: &mut AppState) {
                 _ => unreachable!(),
             };
             features::wizard::render(frame, app, &ws);
+        }
+        ViewKind::SetupWizard => {
+            let ws = match &app.view {
+                View::SetupWizard(ws) => ws.clone(),
+                _ => unreachable!(),
+            };
+            features::setup::render(frame, app, &ws);
         }
         ViewKind::Help => {
             features::dashboard::render(frame, app);
@@ -335,6 +354,7 @@ fn handle_key(
         View::CredentialMenu(name) => features::credentials::handle_key_menu(app, name.clone(), key),
         View::CredentialInput(name) => features::credentials::handle_key_input(app, name.clone(), key),
         View::Wizard(_) => features::wizard::handle_key(app, key, tx),
+        View::SetupWizard(_) => features::setup::handle_key(app, key, tx),
     }
 }
 
