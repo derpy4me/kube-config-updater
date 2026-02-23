@@ -56,19 +56,18 @@ impl Server {
     /// Constructs the full remote file path for the server, combining path and name.
     /// Falls back to the defaults from the main config if not specified.
     pub fn file_path(&self, config: &Config) -> Result<String, anyhow::Error> {
-        let file_path = self
-            .file_path
-            .as_deref()
-            .or(config.default_file_path.as_deref())
-            .ok_or_else(|| anyhow::anyhow!("[{}] file_path not specified in config", self.name))?;
+        let file_path = self.file_path.as_deref().or(config.default_file_path.as_deref());
+        let file_name = self.file_name.as_deref().or(config.default_file_name.as_deref());
 
-        let file_name = self
-            .file_name
-            .as_deref()
-            .or(config.default_file_name.as_deref())
-            .ok_or_else(|| anyhow::anyhow!("[{}] file_name not specified in config", self.name))?;
+        let full_path = match (file_path, file_name) {
+            (Some(p), Some(n)) => format!("{}/{}", p, n),
+            (Some(p), None)    => p.to_owned(),
+            (None,    None)    => "/etc/rancher/k3s/k3s.yaml".to_owned(),
+            (None,    Some(_)) => anyhow::bail!(
+                "[{}] file_name is set but file_path is missing", self.name
+            ),
+        };
 
-        let full_path = file_path.to_owned() + "/" + file_name;
         log::debug!("Remote file path: {}", full_path);
         Ok(full_path)
     }
