@@ -3,7 +3,7 @@
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/derpy4me/kube-config-updater/main/install.sh | sh
 #   or to pin a version:
-#   curl -fsSL ... | sh -s -- v0.2.0
+#   curl -fsSL ... | sh -s -- v0.1.4
 
 set -e
 
