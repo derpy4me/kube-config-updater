@@ -51,7 +51,7 @@ pub enum View {
 
 // ─── Setup Wizard ─────────────────────────────────────────────────────────────
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct SetupWizardState {
     pub step: SetupStep,
     pub output_dir: String,
@@ -61,7 +61,7 @@ pub struct SetupWizardState {
     pub error: Option<String>,
 }
 
-#[derive(Clone, PartialEq, Default)]
+#[derive(Clone, PartialEq, Default, Debug)]
 pub enum SetupStep {
     #[default]
     OutputDir,

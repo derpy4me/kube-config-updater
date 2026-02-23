@@ -17,7 +17,7 @@ pub struct Config {
     /// The local directory where fetched kubeconfig files will be stored.
     pub local_output_dir: String,
     /// A list of server configurations to process.
-    #[serde(rename = "server")]
+    #[serde(rename = "server", default)]
     pub servers: Vec<Server>,
 }
 
@@ -213,6 +213,44 @@ mod config_tests {
             context_name: None,
             identity_file: None,
         }
+    }
+
+    #[test]
+    fn test_load_config_no_servers_defaults_to_empty() {
+        let f = write_temp_config("local_output_dir = \"/tmp/kube\"\n");
+        let config = load_config(f.path().to_str().unwrap())
+            .expect("config with no [[server]] section should load cleanly");
+        assert!(config.servers.is_empty());
+        assert_eq!(config.local_output_dir, "/tmp/kube");
+    }
+
+    #[test]
+    fn test_load_config_with_defaults_no_servers() {
+        let content = "local_output_dir = \"/tmp/kube\"\n\
+                       default_user = \"ubuntu\"\n\
+                       default_file_path = \"/etc/rancher/k3s\"\n\
+                       default_file_name = \"k3s.yaml\"\n";
+        let f = write_temp_config(content);
+        let config = load_config(f.path().to_str().unwrap())
+            .expect("setup wizard output should load cleanly");
+        assert!(config.servers.is_empty());
+        assert_eq!(config.default_user.as_deref(), Some("ubuntu"));
+        assert_eq!(config.default_file_path.as_deref(), Some("/etc/rancher/k3s"));
+        assert_eq!(config.default_file_name.as_deref(), Some("k3s.yaml"));
+    }
+
+    #[test]
+    fn test_load_config_optional_missing_file_returns_none() {
+        let result = load_config_optional("/nonexistent/path/config.toml")
+            .expect("missing file should return Ok(None), not Err");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_load_config_optional_invalid_toml_returns_err() {
+        let f = write_temp_config("this is not [ valid toml !!!");
+        let result = load_config_optional(f.path().to_str().unwrap());
+        assert!(result.is_err(), "invalid TOML should return Err");
     }
 
     #[test]
