@@ -55,6 +55,11 @@ pub fn render(frame: &mut Frame, app: &mut AppState, wizard: &WizardState) {
 
     // Row 4: footer
     render_footer(frame, wizard, rows[4]);
+
+    // Help overlay (rendered on top of everything)
+    if wizard.help_open {
+        render_help_popup(frame, wizard);
+    }
 }
 
 fn render_step_indicator(frame: &mut Frame, wizard: &WizardState, area: ratatui::layout::Rect) {
@@ -179,19 +184,37 @@ fn render_auth_content(
     // Sub-fields depending on method
     match wizard.auth_method {
         AuthMethod::Password => {
-            let sub_label = Paragraph::new("  Password:");
+            let sub_label = Paragraph::new(if wizard.auth_input_focused {
+                "  Password: [Enter to test, Esc to cancel]"
+            } else {
+                "  Password:"
+            });
             frame.render_widget(sub_label, rows[3]);
 
             let masked = wizard.password_input.masked_display();
-            let input_line = Paragraph::new(format!("  > {}│", masked));
+            let input_style = if wizard.auth_input_focused {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let input_line = Paragraph::new(format!("  > {}│", masked)).style(input_style);
             frame.render_widget(input_line, rows[4]);
         }
         AuthMethod::IdentityFile => {
-            let sub_label = Paragraph::new("  Identity file path:");
+            let sub_label = Paragraph::new(if wizard.auth_input_focused {
+                "  Identity file path: [Enter to test, Esc to cancel]"
+            } else {
+                "  Identity file path:"
+            });
             frame.render_widget(sub_label, rows[3]);
 
-            let input_line =
-                Paragraph::new(format!("  > {}│", wizard.identity_file_input));
+            let input_style = if wizard.auth_input_focused {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let input_line = Paragraph::new(format!("  > {}│", wizard.identity_file_input))
+                .style(input_style);
             frame.render_widget(input_line, rows[4]);
         }
     }
@@ -247,9 +270,13 @@ fn render_error_area(
 
 fn render_footer(frame: &mut Frame, wizard: &WizardState, area: ratatui::layout::Rect) {
     let hints = if wizard.step == WizardStep::Auth {
-        "  p:password  i:identity  t:test  s:save (after test)  Esc:back  q:cancel"
+        if wizard.auth_input_focused {
+            "  Enter: test  Esc: cancel  Backspace: delete"
+        } else {
+            "  Enter:type  t:test  s:save (after test)  Esc:back  ?:help"
+        }
     } else {
-        "  Enter: next  Esc: back  q: cancel"
+        "  Enter: next  Esc: back  q: cancel  ?:help"
     };
     let footer = Paragraph::new(hints);
     frame.render_widget(footer, area);
@@ -265,60 +292,102 @@ pub fn handle_key(
         _ => return false,
     };
 
+    // Help popup: ? toggles, Esc closes; consumes all other keys while open.
+    // Not intercepted when typing into the credential input (? is a valid password char).
+    if !ws.auth_input_focused {
+        if key.code == KeyCode::Char('?') {
+            let mut ws = ws;
+            ws.help_open = !ws.help_open;
+            app.view = View::Wizard(ws);
+            return false;
+        }
+        if ws.help_open {
+            if key.code == KeyCode::Esc {
+                let mut ws = ws;
+                ws.help_open = false;
+                app.view = View::Wizard(ws);
+            }
+            return false;
+        }
+    }
+
     if ws.step == WizardStep::Auth {
-        match key.code {
-            KeyCode::Char('p') | KeyCode::Char('P') => {
-                let mut ws = ws;
-                ws.auth_method = AuthMethod::Password;
-                app.view = View::Wizard(ws);
-            }
-            KeyCode::Char('i') | KeyCode::Char('I') => {
-                let mut ws = ws;
-                ws.auth_method = AuthMethod::IdentityFile;
-                app.view = View::Wizard(ws);
-            }
-            KeyCode::Char('t') | KeyCode::Char('T') => {
-                if !ws.testing {
-                    let mut ws = ws;
-                    ws.testing = true;
-                    ws.test_passed = false;
-                    ws.error = None;
-                    let ws_snap = ws.clone();
-                    app.in_progress.insert("__wizard__".to_string());
-                    app.view = View::Wizard(ws);
-                    spawn_wizard_test(ws_snap, tx.clone());
-                }
-            }
-            KeyCode::Char('s') | KeyCode::Char('S') => {
-                if ws.test_passed {
-                    let ws_snap = ws.clone();
-                    wizard_save(app, &ws_snap);
-                }
-            }
-            KeyCode::Backspace => {
-                let mut ws = ws;
-                match ws.auth_method {
-                    AuthMethod::Password => { ws.password_input.pop(); }
-                    AuthMethod::IdentityFile => { ws.identity_file_input.pop(); }
-                }
-                app.view = View::Wizard(ws);
-            }
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                let mut ws = ws;
-                match ws.auth_method {
-                    AuthMethod::Password => { ws.password_input.push(c); }
-                    AuthMethod::IdentityFile => { ws.identity_file_input.push(c); }
-                }
-                app.view = View::Wizard(ws);
-            }
-            KeyCode::Esc => {
-                let mut ws = ws;
-                if let Some(prev) = ws.step.prev() {
-                    ws.step = prev;
+        let mut ws = ws;
+        if ws.auth_input_focused {
+            match key.code {
+                KeyCode::Esc => {
+                    ws.auth_input_focused = false;
                     app.view = View::Wizard(ws);
                 }
+                KeyCode::Enter => {
+                    ws.auth_input_focused = false;
+                    if !ws.testing {
+                        ws.testing = true;
+                        ws.test_passed = false;
+                        ws.error = None;
+                        let ws_snap = ws.clone();
+                        app.in_progress.insert("__wizard__".to_string());
+                        app.view = View::Wizard(ws);
+                        spawn_wizard_test(ws_snap, tx.clone());
+                    } else {
+                        app.view = View::Wizard(ws);
+                    }
+                }
+                KeyCode::Backspace => {
+                    match ws.auth_method {
+                        AuthMethod::Password => { ws.password_input.pop(); }
+                        AuthMethod::IdentityFile => { ws.identity_file_input.pop(); }
+                    }
+                    app.view = View::Wizard(ws);
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    match ws.auth_method {
+                        AuthMethod::Password => { ws.password_input.push(c); }
+                        AuthMethod::IdentityFile => { ws.identity_file_input.push(c); }
+                    }
+                    app.view = View::Wizard(ws);
+                }
+                _ => {}
             }
-            _ => {}
+        } else {
+            match key.code {
+                KeyCode::Char('p') | KeyCode::Char('P') => {
+                    ws.auth_method = AuthMethod::Password;
+                    app.view = View::Wizard(ws);
+                }
+                KeyCode::Char('i') | KeyCode::Char('I') => {
+                    ws.auth_method = AuthMethod::IdentityFile;
+                    app.view = View::Wizard(ws);
+                }
+                KeyCode::Enter => {
+                    ws.auth_input_focused = true;
+                    app.view = View::Wizard(ws);
+                }
+                KeyCode::Char('t') | KeyCode::Char('T') => {
+                    if !ws.testing {
+                        ws.testing = true;
+                        ws.test_passed = false;
+                        ws.error = None;
+                        let ws_snap = ws.clone();
+                        app.in_progress.insert("__wizard__".to_string());
+                        app.view = View::Wizard(ws);
+                        spawn_wizard_test(ws_snap, tx.clone());
+                    }
+                }
+                KeyCode::Char('s') | KeyCode::Char('S') => {
+                    if ws.test_passed {
+                        let ws_snap = ws.clone();
+                        wizard_save(app, &ws_snap);
+                    }
+                }
+                KeyCode::Esc => {
+                    if let Some(prev) = ws.step.prev() {
+                        ws.step = prev;
+                        app.view = View::Wizard(ws);
+                    }
+                }
+                _ => {}
+            }
         }
     } else {
         match key.code {
@@ -496,5 +565,153 @@ fn wizard_validate_current(
             None
         }
         _ => None,
+    }
+}
+
+// ─── Help Popup ───────────────────────────────────────────────────────────────
+
+fn render_help_popup(frame: &mut Frame, wizard: &WizardState) {
+    let popup_area = centered_rect(62, 17, frame.area());
+    frame.render_widget(Clear, popup_area);
+
+    let title = format!(" ? Help — {} ", wizard.step.label());
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded);
+
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    let rows = Layout::vertical([
+        Constraint::Fill(1),   // content
+        Constraint::Length(1), // close hint
+    ])
+    .split(inner);
+
+    let lines = step_help_lines(&wizard.step);
+    frame.render_widget(Paragraph::new(lines), rows[0]);
+
+    let close_hint = Paragraph::new("  ? or Esc to close")
+        .style(Style::default().add_modifier(Modifier::DIM));
+    frame.render_widget(close_hint, rows[1]);
+}
+
+fn step_help_lines(step: &WizardStep) -> Vec<Line<'static>> {
+    fn h(s: &'static str) -> Line<'static> {
+        Line::from(Span::styled(s, Style::default().add_modifier(Modifier::BOLD)))
+    }
+    fn t(s: &'static str) -> Line<'static> {
+        Line::from(s)
+    }
+    let b = Line::from("");
+
+    match step {
+        WizardStep::Name => vec![
+            b.clone(),
+            h("  Purpose"),
+            t("    The internal identifier used throughout"),
+            t("    the app. Shown in the dashboard, local"),
+            t("    filenames, and notifications."),
+            b.clone(),
+            h("  What to enter"),
+            t("    A short label with no spaces."),
+            t("    e.g.  k3s-home  or  prod-cluster"),
+            b.clone(),
+            h("  Tip"),
+            t("    Must be unique. Cannot be changed after"),
+            t("    saving without editing the config file."),
+        ],
+        WizardStep::Address => vec![
+            b.clone(),
+            h("  Purpose"),
+            t("    The SSH host this tool connects to when"),
+            t("    fetching your kubeconfig. Must be"),
+            t("    reachable on port 22 from this machine."),
+            b.clone(),
+            h("  What to enter"),
+            t("    An IP address or hostname."),
+            t("    e.g.  192.168.1.10  or  k3s.local"),
+        ],
+        WizardStep::User => vec![
+            b.clone(),
+            h("  Purpose"),
+            t("    The Unix user the tool will SSH as"),
+            t("    on this server."),
+            b.clone(),
+            h("  What to enter"),
+            t("    e.g.  root  or any user with file access."),
+            t("    Leave blank to use the config default."),
+            b.clone(),
+            h("  Tip"),
+            t("    For password auth, the user needs read"),
+            t("    access to the remote file or sudo rights."),
+        ],
+        WizardStep::FilePath => vec![
+            b.clone(),
+            h("  Purpose"),
+            t("    The absolute path to the kubeconfig"),
+            t("    file on the remote server."),
+            b.clone(),
+            h("  What to enter"),
+            t("    Leave blank for the k3s default:"),
+            t("      /etc/rancher/k3s/k3s.yaml"),
+            t("    For RKE2:"),
+            t("      /etc/rancher/rke2/rke2.yaml"),
+        ],
+        WizardStep::FileName => vec![
+            b.clone(),
+            h("  Purpose"),
+            t("    The filename used when saving this"),
+            t("    server's kubeconfig in your local"),
+            t("    output directory."),
+            b.clone(),
+            h("  What to enter"),
+            t("    e.g.  mycluster.yaml"),
+            t("    Leave blank to default to {name}.yaml"),
+            t("    (where {name} is from step 1)."),
+        ],
+        WizardStep::TargetClusterIp => vec![
+            b.clone(),
+            h("  Purpose"),
+            t("    k3s kubeconfigs often list 127.0.0.1 as"),
+            t("    the cluster address. This IP replaces it"),
+            t("    so kubectl works from your machine."),
+            b.clone(),
+            h("  What to enter"),
+            t("    The server's IP reachable from here."),
+            t("    e.g.  192.168.1.10  (often same as step 2)"),
+            b.clone(),
+            h("  Tip"),
+            t("    Never use 127.0.0.1 — that routes"),
+            t("    kubectl back to your local machine."),
+        ],
+        WizardStep::ContextName => vec![
+            b.clone(),
+            h("  Purpose"),
+            t("    The Kubernetes context name written into"),
+            t("    your kubeconfig. Used by kubectl, k9s,"),
+            t("    and Lens to identify this cluster."),
+            b.clone(),
+            h("  What to enter"),
+            t("    e.g.  home-cluster"),
+            t("    Leave blank to use the server name"),
+            t("    from step 1."),
+        ],
+        WizardStep::Auth => vec![
+            b.clone(),
+            h("  Purpose"),
+            t("    How this tool authenticates via SSH"),
+            t("    to fetch your kubeconfig."),
+            b.clone(),
+            h("  Password"),
+            t("    Enter your SSH password. The tool uses"),
+            t("    sudo -S to read the remote file."),
+            b.clone(),
+            h("  Identity file"),
+            t("    Path to your SSH private key."),
+            t("    e.g.  ~/.ssh/id_rsa"),
+            t("    The key must be authorized on the server."),
+        ],
     }
 }
