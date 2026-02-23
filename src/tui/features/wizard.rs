@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Constraint, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 
@@ -13,9 +13,14 @@ use crate::tui::app::{AppEvent, AppState, AuthMethod, View, WizardState, WizardS
 use super::{centered_rect, render_dim_background};
 
 pub fn render(frame: &mut Frame, app: &mut AppState, wizard: &WizardState) {
-    render_dim_background(frame, frame.area());
+    let area = frame.area();
+    render_dim_background(frame, area);
 
-    let popup_area = centered_rect(70, 22, frame.area());
+    let popup_area = centered_rect(
+        area.width.saturating_sub(4).min(70),
+        area.height.saturating_sub(4).min(22),
+        area,
+    );
     frame.render_widget(Clear, popup_area);
 
     let block = Block::default()
@@ -137,7 +142,7 @@ fn render_text_input_content(frame: &mut Frame, wizard: &WizardState, area: rata
     let input_line = Paragraph::new(format!("  > {}│", value));
     frame.render_widget(input_line, content_rows[1]);
 
-    let hint_line = Paragraph::new(format!("  {}", hint));
+    let hint_line = Paragraph::new(format!("  {}", hint)).wrap(Wrap { trim: true });
     frame.render_widget(hint_line, content_rows[3]);
 }
 
@@ -261,7 +266,7 @@ fn render_error_area(
         } else {
             Style::default()
         };
-        let err_line = Paragraph::new(format!("  {}", err_msg)).style(style);
+        let err_line = Paragraph::new(format!("  {}", err_msg)).style(style).wrap(Wrap { trim: true });
         frame.render_widget(err_line, err_rows[0]);
     }
     // second row stays blank
@@ -326,9 +331,10 @@ pub fn handle_key(
                         ws.test_passed = false;
                         ws.error = None;
                         let ws_snap = ws.clone();
+                        let default_user = app.config.default_user.clone();
                         app.in_progress.insert("__wizard__".to_string());
                         app.view = View::Wizard(ws);
-                        spawn_wizard_test(ws_snap, tx.clone());
+                        spawn_wizard_test(ws_snap, default_user, tx.clone());
                     } else {
                         app.view = View::Wizard(ws);
                     }
@@ -369,9 +375,10 @@ pub fn handle_key(
                         ws.test_passed = false;
                         ws.error = None;
                         let ws_snap = ws.clone();
+                        let default_user = app.config.default_user.clone();
                         app.in_progress.insert("__wizard__".to_string());
                         app.view = View::Wizard(ws);
-                        spawn_wizard_test(ws_snap, tx.clone());
+                        spawn_wizard_test(ws_snap, default_user, tx.clone());
                     }
                 }
                 KeyCode::Char('s') | KeyCode::Char('S') => {
@@ -444,9 +451,9 @@ pub fn handle_key(
     false
 }
 
-fn spawn_wizard_test(ws: WizardState, tx: mpsc::Sender<AppEvent>) {
+fn spawn_wizard_test(ws: WizardState, default_user: Option<String>, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || {
-        let result = do_wizard_connection_test(&ws);
+        let result = do_wizard_connection_test(&ws, default_user);
         tx.send(AppEvent::FetchComplete {
             server_name: "__wizard__".to_string(),
             result: result.map_err(|e| crate::tui::friendly_error(&e)),
@@ -455,8 +462,14 @@ fn spawn_wizard_test(ws: WizardState, tx: mpsc::Sender<AppEvent>) {
     });
 }
 
-fn do_wizard_connection_test(ws: &WizardState) -> Result<(), anyhow::Error> {
-    let user = if ws.user.is_empty() { "root".to_string() } else { ws.user.clone() };
+fn do_wizard_connection_test(ws: &WizardState, default_user: Option<String>) -> Result<(), anyhow::Error> {
+    let user = if !ws.user.is_empty() {
+        ws.user.clone()
+    } else if let Some(ref u) = default_user {
+        u.clone()
+    } else {
+        anyhow::bail!("SSH user is required — fill in step 3 or set a default_user in your config")
+    };
     let file_path = if ws.file_path.is_empty() {
         "/etc/rancher/k3s/k3s.yaml".to_string()
     } else {
@@ -505,11 +518,18 @@ fn wizard_save(app: &mut AppState, ws: &WizardState) {
         };
         return;
     }
-    if ws.auth_method == AuthMethod::Password
-        && !ws.password_input.value.is_empty()
-        && let Err(e) = crate::credentials::set_credential(&ws.name, &ws.password_input.value)
-    {
-        log::warn!("Couldn't save credential for {}: {}", ws.name, e);
+    if ws.auth_method == AuthMethod::Password && !ws.password_input.value.is_empty() {
+        if let Err(e) = crate::credentials::set_credential(&ws.name, &ws.password_input.value) {
+            app.view = View::Error {
+                message: format!(
+                    "Server '{}' was saved but the password could not be stored in the keyring: {}. \
+                     Set it from the dashboard with 'c'.",
+                    ws.name, e
+                ),
+                underlying: Box::new(View::Dashboard),
+            };
+            return;
+        }
     }
     let _ = crate::state::update_server_state(
         &ws.name,
@@ -571,7 +591,12 @@ fn wizard_validate_current(
 // ─── Help Popup ───────────────────────────────────────────────────────────────
 
 fn render_help_popup(frame: &mut Frame, wizard: &WizardState) {
-    let popup_area = centered_rect(62, 17, frame.area());
+    let area = frame.area();
+    let popup_area = centered_rect(
+        area.width.saturating_sub(4).min(62),
+        area.height.saturating_sub(4).min(17),
+        area,
+    );
     frame.render_widget(Clear, popup_area);
 
     let title = format!(" ? Help — {} ", wizard.step.label());

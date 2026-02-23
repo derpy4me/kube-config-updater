@@ -4,7 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     layout::{Constraint, Layout},
     style::{Color, Style},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 
@@ -12,7 +12,12 @@ use crate::tui::app::{AppEvent, AppState, SetupStep, SetupWizardState, View, Wiz
 use super::centered_rect;
 
 pub fn render(frame: &mut Frame, app: &AppState, wizard: &SetupWizardState) {
-    let popup_area = centered_rect(72, 16, frame.area());
+    let area = frame.area();
+    let popup_area = centered_rect(
+        area.width.saturating_sub(4).min(72),
+        area.height.saturating_sub(4).min(16),
+        area,
+    );
     frame.render_widget(Clear, popup_area);
 
     let block = Block::default()
@@ -45,7 +50,7 @@ pub fn render(frame: &mut Frame, app: &AppState, wizard: &SetupWizardState) {
         } else {
             Style::default()
         };
-        frame.render_widget(Paragraph::new(format!("  {}", err)).style(style), rows[3]);
+        frame.render_widget(Paragraph::new(format!("  {}", err)).style(style).wrap(Wrap { trim: true }), rows[3]);
     }
 
     let hints = match wizard.step {
@@ -119,7 +124,7 @@ fn render_content(frame: &mut Frame, wizard: &SetupWizardState, area: ratatui::l
         content_rows[1],
     );
     frame.render_widget(
-        Paragraph::new(format!("  {}", hint)),
+        Paragraph::new(format!("  {}", hint)).wrap(Wrap { trim: true }),
         content_rows[3],
     );
 }
