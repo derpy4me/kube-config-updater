@@ -1,3 +1,4 @@
+use anyhow::Context as _;
 use base64::{engine::general_purpose, Engine as _};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -400,7 +401,12 @@ pub fn merge_into_main_kubeconfig(
         );
     } else {
         let updated = serde_yaml::to_string(&main_config)?;
-        fs::write(&main_config_path, updated)?;
+        if let Some(parent) = main_config_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("creating directory {:?}", parent))?;
+        }
+        fs::write(&main_config_path, updated)
+            .with_context(|| format!("writing {:?}", main_config_path))?;
         log::info!("[{}] Merged cluster/context/user into ~/.kube/config", server_name);
     }
 

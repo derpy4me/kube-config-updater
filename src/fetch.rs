@@ -1,3 +1,4 @@
+use anyhow::Context;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
@@ -77,7 +78,10 @@ pub(crate) fn process_server(
     if dry_run {
         log::info!("[{}] DRY-RUN: Would write config to {:?}", server.name, local_path);
     } else {
-        fs::write(&local_path, &contents)?;
+        fs::create_dir_all(&config.local_output_dir)
+            .with_context(|| format!("creating output directory {:?}", config.local_output_dir))?;
+        fs::write(&local_path, &contents)
+            .with_context(|| format!("writing config to {:?}", local_path))?;
         log::info!("[{}] Config written to {:?}", server.name, local_path);
     }
 
