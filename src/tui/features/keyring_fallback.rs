@@ -30,9 +30,9 @@ pub fn render(frame: &mut Frame, app: &AppState, server_name: &str, keyring_erro
     frame.render_widget(block, popup_area);
 
     let rows = Layout::vertical([
-        Constraint::Length(2), // error section
+        Constraint::Length(3), // error section (up to 3 wrapped lines)
         Constraint::Length(1), // blank
-        Constraint::Length(2), // file path section
+        Constraint::Length(3), // file path section (up to 3 wrapped lines)
         Constraint::Length(1), // blank
         Constraint::Fill(1),   // explanation
         Constraint::Length(1), // blank
@@ -65,7 +65,7 @@ pub fn render(frame: &mut Frame, app: &AppState, server_name: &str, keyring_erro
         ]),
         Line::from(format!("  Permissions: 0600  (only {} can read this file)", whoami())),
     ]);
-    frame.render_widget(path_para, rows[2]);
+    frame.render_widget(path_para.wrap(Wrap { trim: false }), rows[2]);
 
     // Row 4: explanation
     let explanation = vec![
