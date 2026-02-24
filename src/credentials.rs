@@ -1,3 +1,4 @@
+#[cfg(not(target_os = "macos"))]
 use keyring::{Entry, Error as KeyringError};
 
 pub const SERVICE: &str = "kube_config_updater";
@@ -32,9 +33,100 @@ pub trait KeyringBackend {
     fn delete(&self, service: &str, account: &str) -> Result<(), String>;
 }
 
-/// Production implementation backed by the OS keyring via the `keyring` crate.
+/// Production implementation backed by the OS keyring.
+///
+/// On macOS this uses the `security` CLI tool so that stored credentials are
+/// not bound to a specific binary's code signature and survive app updates.
+/// On other platforms it uses the `keyring` crate (D-Bus Secret Service on Linux).
 pub struct RealKeyring;
 
+/// macOS backend: wraps `/usr/bin/security` to read/write generic passwords in
+/// the user's login Keychain without application-specific ACLs.
+#[cfg(target_os = "macos")]
+mod macos_keychain {
+    use std::process::Command;
+
+    pub fn get(service: &str, account: &str) -> Result<Option<String>, String> {
+        let output = Command::new("/usr/bin/security")
+            .args(["find-generic-password", "-s", service, "-a", account, "-w"])
+            .output()
+            .map_err(|e| format!("security command failed: {}", e))?;
+
+        if output.status.success() {
+            let password = String::from_utf8_lossy(&output.stdout)
+                .trim_end_matches('\n')
+                .to_string();
+            Ok(Some(password))
+        } else if output.status.code() == Some(44) {
+            // errSecItemNotFound — no entry exists yet
+            Ok(None)
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            Err(if stderr.is_empty() {
+                format!("security exited with {}", output.status)
+            } else {
+                stderr
+            })
+        }
+    }
+
+    pub fn set(service: &str, account: &str, password: &str) -> Result<(), String> {
+        let status = Command::new("/usr/bin/security")
+            .args([
+                "add-generic-password",
+                "-U", // update existing entry if present
+                "-s", service,
+                "-a", account,
+                "-w", password,
+            ])
+            .status()
+            .map_err(|e| format!("security command failed: {}", e))?;
+
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("security add-generic-password exited with {}", status))
+        }
+    }
+
+    pub fn delete(service: &str, account: &str) -> Result<(), String> {
+        let status = Command::new("/usr/bin/security")
+            .args(["delete-generic-password", "-s", service, "-a", account])
+            .status()
+            .map_err(|e| format!("security command failed: {}", e))?;
+
+        if status.success() || status.code() == Some(44) {
+            // exit 44 = item not found; treat as success (idempotent)
+            Ok(())
+        } else {
+            Err(format!(
+                "security delete-generic-password exited with {}",
+                status
+            ))
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl KeyringBackend for RealKeyring {
+    fn get(&self, service: &str, account: &str) -> CredentialResult {
+        match macos_keychain::get(service, account) {
+            Ok(Some(password)) => CredentialResult::Found(password),
+            Ok(None) => CredentialResult::NotFound,
+            Err(e) => CredentialResult::Unavailable(e),
+        }
+    }
+
+    fn set(&self, service: &str, account: &str, password: &str) -> Result<(), String> {
+        macos_keychain::set(service, account, password)
+    }
+
+    fn delete(&self, service: &str, account: &str) -> Result<(), String> {
+        macos_keychain::delete(service, account)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
 impl KeyringBackend for RealKeyring {
     fn get(&self, service: &str, account: &str) -> CredentialResult {
         match Entry::new(service, account) {

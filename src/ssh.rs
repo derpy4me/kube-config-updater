@@ -48,7 +48,14 @@ pub fn fetch_remote_file(
         session.userauth_password(user, pw)?;
     } else {
         log::info!("[{}] Authenticating with SSH agent", server_name);
-        session.userauth_agent(user)?;
+        session.userauth_agent(user).map_err(|e| {
+            anyhow::anyhow!(
+                "No password or identity file configured for '{}'. \
+                 SSH agent authentication failed: {}. \
+                 Use 'c' in the dashboard to add credentials.",
+                server_name, e
+            )
+        })?;
     }
     log::info!("[{}] Authentication successful", server_name);
 

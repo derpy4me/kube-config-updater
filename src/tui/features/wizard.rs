@@ -520,6 +520,11 @@ fn wizard_save(app: &mut AppState, ws: &WizardState) {
     }
     if ws.auth_method == AuthMethod::Password && !ws.password_input.value.is_empty() {
         if let Err(e) = crate::credentials::set_credential(&ws.name, &ws.password_input.value) {
+            // Server was already written to disk; reload config so it appears in the dashboard.
+            let path_str = app.config_path.to_string_lossy().to_string();
+            if let Ok(new_config) = crate::config::load_config(&path_str) {
+                app.config = new_config;
+            }
             app.view = View::Error {
                 message: format!(
                     "Server '{}' was saved but the password could not be stored in the keyring: {}. \
