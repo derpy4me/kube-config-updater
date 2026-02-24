@@ -118,11 +118,18 @@ pub fn handle_key_input(app: &mut AppState, name: String, key: KeyEvent) -> bool
                     app.view = View::Dashboard;
                 }
                 Err(e) => {
-                    let msg = format!("Couldn't save credential: {}", e);
-                    app.view = View::Error {
-                        message: msg,
-                        underlying: Box::new(View::Dashboard),
-                    };
+                    if crate::credentials::keyring_error_is_unavailable(&e) {
+                        app.view = View::KeyringFallbackConsent {
+                            server_name: name.clone(),
+                            password,
+                            keyring_error: e,
+                        };
+                    } else {
+                        app.view = View::Error {
+                            message: format!("Couldn't save credential: {}", e),
+                            underlying: Box::new(View::Dashboard),
+                        };
+                    }
                 }
             }
         }

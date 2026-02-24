@@ -1,6 +1,12 @@
 #[cfg(not(target_os = "macos"))]
 use keyring::{Entry, Error as KeyringError};
 
+#[cfg(not(target_os = "macos"))]
+use base64::{engine::general_purpose, Engine as _};
+
+#[cfg(not(target_os = "macos"))]
+use std::collections::HashMap;
+
 pub const SERVICE: &str = "kube_config_updater";
 pub const DEFAULT_ACCOUNT: &str = "_default";
 
@@ -150,11 +156,151 @@ impl KeyringBackend for RealKeyring {
     }
 }
 
+// ─── File-based fallback keyring (Linux / non-macOS) ──────────────────────────
+//
+// Used when the D-Bus Secret Service daemon is not available.
+// Passwords are stored in a plain-text file with 0600 permissions (owner-read-only).
+// This is the same security model as ~/.kube/config and ~/.ssh/id_rsa.
+//
+// File location: ~/.config/kube_config_updater/credentials
+// Format: one entry per line, tab-separated: account_name <TAB> base64(password)
+// Lines starting with '#' are comments.
+
+#[cfg(not(target_os = "macos"))]
+pub struct FileKeyring {
+    path: std::path::PathBuf,
+}
+
+#[cfg(not(target_os = "macos"))]
+impl FileKeyring {
+    pub fn default_path() -> std::path::PathBuf {
+        dirs::config_dir()
+            .unwrap_or_else(|| {
+                dirs::home_dir()
+                    .unwrap_or_default()
+                    .join(".config")
+            })
+            .join("kube_config_updater")
+            .join("credentials")
+    }
+
+    fn load(&self) -> HashMap<String, String> {
+        let content = match std::fs::read_to_string(&self.path) {
+            Ok(c) => c,
+            Err(_) => return HashMap::new(),
+        };
+        let mut map = HashMap::new();
+        for line in content.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            if let Some((account, b64)) = line.split_once('\t') {
+                if let Ok(pw_bytes) = general_purpose::STANDARD.decode(b64.trim()) {
+                    if let Ok(pw) = String::from_utf8(pw_bytes) {
+                        map.insert(account.to_string(), pw);
+                    }
+                }
+            }
+        }
+        map
+    }
+
+    fn save(&self, store: &HashMap<String, String>) -> Result<(), String> {
+        use std::io::Write;
+
+        let parent = self.path.parent().ok_or("invalid credentials path")?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("could not create credentials directory: {}", e))?;
+
+        // Restrict directory to owner-only before writing
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                .map_err(|e| format!("could not set directory permissions: {}", e))?;
+        }
+
+        let mut content = String::from(
+            "# kube_config_updater credentials\n\
+             # Stored with restricted permissions (0600) — only you can read this file.\n\
+             # Same security model as ~/.kube/config and ~/.ssh/id_rsa.\n",
+        );
+        for (account, password) in store {
+            let b64 = general_purpose::STANDARD.encode(password.as_bytes());
+            content.push_str(&format!("{}\t{}\n", account, b64));
+        }
+
+        // Write to a temp file first, then rename atomically
+        let tmp = self.path.with_extension("tmp");
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp)
+            .map_err(|e| format!("could not write credentials file: {}", e))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| format!("could not set file permissions: {}", e))?;
+        }
+
+        file.write_all(content.as_bytes())
+            .map_err(|e| format!("could not write credentials: {}", e))?;
+        drop(file);
+
+        std::fs::rename(&tmp, &self.path)
+            .map_err(|e| format!("could not finalize credentials file: {}", e))?;
+
+        Ok(())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+impl KeyringBackend for FileKeyring {
+    fn get(&self, _service: &str, account: &str) -> CredentialResult {
+        let store = self.load();
+        match store.get(account) {
+            Some(pw) => CredentialResult::Found(pw.clone()),
+            None => CredentialResult::NotFound,
+        }
+    }
+
+    fn set(&self, _service: &str, account: &str, password: &str) -> Result<(), String> {
+        let mut store = self.load();
+        store.insert(account.to_string(), password.to_string());
+        self.save(&store)
+    }
+
+    fn delete(&self, _service: &str, account: &str) -> Result<(), String> {
+        let mut store = self.load();
+        store.remove(account);
+        self.save(&store)
+    }
+}
+
+// ─── Public API ───────────────────────────────────────────────────────────────
+
 /// Look up a credential for the given server name.
 ///
-/// Falls back to the DEFAULT_ACCOUNT entry when no server-specific entry
-/// exists. Passwords are never written to any log call.
+/// On non-macOS: tries the system keyring first; if unavailable (no D-Bus daemon),
+/// falls back to the file store (transparent read — the user already consented when
+/// they stored the credential via `set_credential_file`).
+///
+/// Falls back to the DEFAULT_ACCOUNT entry when no server-specific entry exists.
+/// Passwords are never written to any log call.
 pub fn get_credential(server_name: &str) -> CredentialResult {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let primary = get_credential_with(server_name, &RealKeyring);
+        if matches!(primary, CredentialResult::Unavailable(_)) {
+            let file = FileKeyring { path: FileKeyring::default_path() };
+            return get_credential_with(server_name, &file);
+        }
+        return primary;
+    }
+    #[cfg(target_os = "macos")]
     get_credential_with(server_name, &RealKeyring)
 }
 
@@ -168,7 +314,10 @@ pub fn get_credential_with(server_name: &str, backend: &dyn KeyringBackend) -> C
     }
 }
 
-/// Store a credential for the given server name in the OS keyring.
+/// Store a credential for the given server name using the primary keyring backend.
+/// On Linux this requires a running D-Bus Secret Service daemon.
+/// If unavailable, the caller should present a consent dialog and then call
+/// `set_credential_file` instead.
 pub fn set_credential(server_name: &str, password: &str) -> Result<(), String> {
     set_credential_with(server_name, password, &RealKeyring)
 }
@@ -181,8 +330,36 @@ pub fn set_credential_with(
     backend.set(SERVICE, server_name, password)
 }
 
+/// Store a credential in the file-based fallback store with 0600 permissions.
+///
+/// Only call this after the user has explicitly consented to file-based storage
+/// (i.e., accepted the `KeyringFallbackConsent` dialog).
+///
+/// On macOS the security CLI is always available, so this path is never reached;
+/// it is provided here only to keep the call-site cross-platform.
+pub fn set_credential_file(server_name: &str, password: &str) -> Result<(), String> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let file = FileKeyring { path: FileKeyring::default_path() };
+        return set_credential_with(server_name, password, &file);
+    }
+    #[cfg(target_os = "macos")]
+    set_credential_with(server_name, password, &RealKeyring)
+}
+
 /// Remove the credential for the given server name from the OS keyring.
+/// On non-macOS, also removes from the file store (in case the credential was
+/// stored there as a fallback).
 pub fn delete_credential(server_name: &str) -> Result<(), String> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Try keyring first (may not be available — ignore that specific error)
+        let _ = delete_credential_with(server_name, &RealKeyring);
+        // Always also attempt to remove from file store (idempotent)
+        let file = FileKeyring { path: FileKeyring::default_path() };
+        return delete_credential_with(server_name, &file);
+    }
+    #[cfg(target_os = "macos")]
     delete_credential_with(server_name, &RealKeyring)
 }
 
@@ -211,6 +388,30 @@ pub fn check_credentials_with<'a>(
             (name, result)
         })
         .collect()
+}
+
+/// Returns true if the keyring error indicates the secret service daemon is not
+/// available (rather than a transient or permission error). Used to decide whether
+/// to offer the file-based fallback consent dialog.
+pub fn keyring_error_is_unavailable(err: &str) -> bool {
+    let lower = err.to_lowercase();
+    lower.contains("platform secure storage")
+        || lower.contains("dbus")
+        || lower.contains("org.freedesktop.secrets")
+        || lower.contains("no storage access")
+        || lower.contains("secret service")
+}
+
+/// Returns the path to the file-based credential store (for display in UI messages).
+pub fn credential_file_path() -> String {
+    #[cfg(not(target_os = "macos"))]
+    {
+        FileKeyring::default_path().to_string_lossy().into_owned()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "macOS Keychain (via security CLI)".to_string()
+    }
 }
 
 #[cfg(test)]
@@ -310,5 +511,15 @@ mod tests {
         let debug_str = format!("{found:?}");
         assert!(!debug_str.contains("super-secret"));
         assert!(debug_str.contains("redacted"));
+    }
+
+    #[test]
+    fn test_keyring_error_is_unavailable_detects_dbus() {
+        assert!(keyring_error_is_unavailable(
+            "Platform secure storage failure: DBus error: Failed to execute program org.freedesktop.secrets: No such file or directory"
+        ));
+        assert!(keyring_error_is_unavailable("dbus connection failed"));
+        assert!(!keyring_error_is_unavailable("wrong password"));
+        assert!(!keyring_error_is_unavailable("authentication failed"));
     }
 }

@@ -47,6 +47,13 @@ pub enum View {
         message: String,
         underlying: Box<View>,
     },
+    /// Shown when the system keyring is unavailable and the user must explicitly
+    /// accept or decline file-based credential storage before anything is written.
+    KeyringFallbackConsent {
+        server_name: String,
+        password: String,
+        keyring_error: String,
+    },
 }
 
 // ─── Setup Wizard ─────────────────────────────────────────────────────────────

@@ -272,6 +272,7 @@ fn render_app(frame: &mut ratatui::Frame, app: &mut AppState) {
         CredentialMenu(String),
         CredentialInput(String),
         DeleteConfirm(String),
+        KeyringFallbackConsent(String, String), // (server_name, keyring_error)
     }
 
     let kind = match &app.view {
@@ -284,6 +285,9 @@ fn render_app(frame: &mut ratatui::Frame, app: &mut AppState) {
         View::CredentialMenu(name) => ViewKind::CredentialMenu(name.clone()),
         View::CredentialInput(name) => ViewKind::CredentialInput(name.clone()),
         View::DeleteConfirm(name) => ViewKind::DeleteConfirm(name.clone()),
+        View::KeyringFallbackConsent { server_name, keyring_error, .. } => {
+            ViewKind::KeyringFallbackConsent(server_name.clone(), keyring_error.clone())
+        }
     };
 
     match kind {
@@ -327,6 +331,10 @@ fn render_app(frame: &mut ratatui::Frame, app: &mut AppState) {
             features::render_dim_background(frame, frame.area());
             features::dashboard::render_delete_confirm(frame, app, &name);
         }
+        ViewKind::KeyringFallbackConsent(server_name, keyring_error) => {
+            features::dashboard::render(frame, app);
+            features::keyring_fallback::render(frame, app, &server_name, &keyring_error);
+        }
     }
 }
 
@@ -355,6 +363,7 @@ fn handle_key(
         View::CredentialInput(name) => features::credentials::handle_key_input(app, name.clone(), key),
         View::Wizard(_) => features::wizard::handle_key(app, key, tx),
         View::SetupWizard(_) => features::setup::handle_key(app, key, tx),
+        View::KeyringFallbackConsent { .. } => features::keyring_fallback::handle_key(app, key),
     }
 }
 

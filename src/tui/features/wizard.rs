@@ -525,14 +525,23 @@ fn wizard_save(app: &mut AppState, ws: &WizardState) {
             if let Ok(new_config) = crate::config::load_config(&path_str) {
                 app.config = new_config;
             }
-            app.view = View::Error {
-                message: format!(
-                    "Server '{}' was saved but the password could not be stored in the keyring: {}. \
-                     Set it from the dashboard with 'c'.",
-                    ws.name, e
-                ),
-                underlying: Box::new(View::Dashboard),
-            };
+            if crate::credentials::keyring_error_is_unavailable(&e) {
+                // Offer the file-based fallback; user must explicitly accept before anything is written.
+                app.view = View::KeyringFallbackConsent {
+                    server_name: ws.name.clone(),
+                    password: ws.password_input.value.clone(),
+                    keyring_error: e,
+                };
+            } else {
+                app.view = View::Error {
+                    message: format!(
+                        "Server '{}' was saved but the password could not be stored in the keyring: {}. \
+                         Set it from the dashboard with 'c'.",
+                        ws.name, e
+                    ),
+                    underlying: Box::new(View::Dashboard),
+                };
+            }
             return;
         }
     }

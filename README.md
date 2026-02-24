@@ -5,7 +5,7 @@ A CLI tool and interactive TUI for fetching k3s kubeconfig files from remote ser
 ## Features
 
 - **Automatic cert-expiry checking** — skips servers with valid certs; fetches only when expired or unknown
-- **OS keyring integration** — passwords stored securely via the system keyring (never in config files)
+- **OS keyring integration** — passwords stored via the system keyring; file-based fallback (0600 permissions) when no keyring daemon is available
 - **Parallel processing** — all servers fetched concurrently with a progress bar
 - **Interactive TUI** — dashboard with server list, cert expiry, fetch status, and per-server detail view
 - **Server cert probe** — read-only SSH check to compare remote cert against local cache without writing
@@ -48,15 +48,38 @@ The binary is ad-hoc signed but not notarized (no Apple Developer Program requir
 xattr -d com.apple.quarantine /usr/local/bin/kube_config_updater
 ```
 
-#### Linux runtime requirement
+#### Linux credential storage
 
-The keyring integration requires `libsecret` at runtime (GNOME secret service). On Ubuntu:
+The tool attempts to store SSH passwords in the GNOME Secret Service (D-Bus). On desktop Ubuntu this typically works out of the box. On headless or minimal installs (common for k3s servers), no secret service daemon is running.
 
-```bash
-sudo apt-get install libsecret-1-0
+**When the keyring is unavailable**, the TUI shows a consent dialog:
+
+```
+ Credential Storage Fallback
+ ────────────────────────────────────────────────────────────
+ Keyring unavailable: Platform secure storage failure: …
+
+ Fallback file: ~/.config/kube_config_updater/credentials
+ Permissions:   0600  (only you can read this file)
+
+ This is the same security model used by:
+   ~/.kube/config   (kubectl credentials)
+   ~/.ssh/id_rsa    (SSH private keys)
+
+ [y] Store to file    [n] Cancel — do not store
 ```
 
-A running secret service daemon is also required (`gnome-keyring-daemon` on desktop Ubuntu). Headless / server installs without a secret service are not currently supported — the tool will exit with an error rather than fall back to plaintext storage.
+You must explicitly press **y** to accept file-based storage. Nothing is written until you do. If you press **n**, the server is still added but has no credential; set one later with `c` in the TUI.
+
+**To use the system keyring** (stronger isolation) on a headless server:
+
+```bash
+sudo apt-get install gnome-keyring libsecret-1-0
+```
+
+Then start a keyring daemon in your session and re-set the credential with `c`.
+
+**Security model of the file fallback**: passwords are stored as base64-encoded text (base64 is encoding, not encryption) in a file with `chmod 0600` — readable only by your Unix user. Root can always read any file. This is identical to how `~/.kube/config`, `~/.ssh/id_rsa`, and `~/.aws/credentials` work.
 
 ### Build from source
 
@@ -171,7 +194,7 @@ kube_config_updater tui
 
 ### Manage credentials
 
-Passwords are stored in the OS keyring, never in config files.
+Passwords are stored in the OS keyring when available. On Linux systems without a running secret service daemon, the TUI offers an explicit consent dialog to store credentials in a file with `0600` permissions instead (see [Linux credential storage](#linux-credential-storage) above). Passwords are never stored in the app config file.
 
 ```bash
 # Store a password (prompts securely)
@@ -239,7 +262,7 @@ src/
 ├── main.rs           CLI entry point and command routing
 ├── fetch.rs          Server processing loop (parallel, cert-skip logic)
 ├── config.rs         Config loading, server add/remove (comment-preserving)
-├── credentials.rs    OS keyring integration
+├── credentials.rs    OS keyring + file fallback credential storage
 ├── state.rs          Run state persistence (JSON, atomic writes)
 ├── ssh.rs            SSH connection and remote file retrieval
 ├── kube.rs           Kubeconfig parsing, cert extraction, merge logic
@@ -251,6 +274,7 @@ src/
         ├── dashboard.rs   Server list, delete confirm, error overlay
         ├── detail.rs      Server detail, cert probe
         ├── wizard.rs      Add-server wizard, connection test
-        ├── credentials.rs Credential set/delete UI
-        └── help.rs        Help modal
+        ├── credentials.rs     Credential set/delete UI
+        ├── keyring_fallback.rs Consent dialog for file-based credential fallback
+        └── help.rs            Help modal
 ```
