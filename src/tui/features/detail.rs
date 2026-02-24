@@ -272,12 +272,7 @@ pub fn handle_key(
             if !app.in_progress.contains(&name)
                 && let Some(server) = app.config.servers.iter().find(|s| s.name == name).cloned()
             {
-                app.pre_fetch_expiry.insert(
-                    name.clone(),
-                    app.cert_cache.get(&name).copied().flatten(),
-                );
-                app.in_progress.insert(name.clone());
-                crate::tui::spawn_fetch(server, app.config.clone(), app.dry_run, true, tx.clone());
+                crate::tui::start_fetch(app, server, tx);
             }
         }
         KeyCode::Char('p') => {

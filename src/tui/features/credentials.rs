@@ -9,7 +9,7 @@ use ratatui::{
 use crate::tui::app::{AppState, View};
 use super::{centered_rect, render_dim_background};
 
-pub fn render_menu(frame: &mut Frame, app: &mut AppState, server_name: &str) {
+pub fn render_menu(frame: &mut Frame, _app: &AppState, server_name: &str) {
     render_dim_background(frame, frame.area());
 
     let area = centered_rect(40, 7, frame.area());
@@ -33,7 +33,6 @@ pub fn render_menu(frame: &mut Frame, app: &mut AppState, server_name: &str) {
 
     let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(paragraph, area);
-    let _ = app;
 }
 
 pub fn render_input(frame: &mut Frame, app: &mut AppState, server_name: &str) {
@@ -81,10 +80,7 @@ pub fn handle_key_menu(app: &mut AppState, name: String, key: KeyEvent) -> bool 
                 }
                 Err(e) => {
                     let msg = format!("Couldn't delete credential: {}", e);
-                    app.view = View::Error {
-                        message: msg,
-                        underlying: Box::new(View::Dashboard),
-                    };
+                    app.view = View::Error { message: msg };
                     return false;
                 }
             }
@@ -127,7 +123,6 @@ pub fn handle_key_input(app: &mut AppState, name: String, key: KeyEvent) -> bool
                     } else {
                         app.view = View::Error {
                             message: format!("Couldn't save credential: {}", e),
-                            underlying: Box::new(View::Dashboard),
                         };
                     }
                 }

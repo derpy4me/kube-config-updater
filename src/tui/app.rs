@@ -7,12 +7,19 @@ use crate::state::ServerRunState;
 
 // ─── Events ──────────────────────────────────────────────────────────────────
 
+/// Sentinel used in `in_progress` to track a wizard connection test.
+/// Kept as a constant to avoid the same magic string appearing across multiple files.
+pub const WIZARD_SENTINEL: &str = "__wizard__";
+
 pub enum AppEvent {
     Key(KeyEvent),
     Resize(u16, u16),
     Tick,
     FetchComplete {
         server_name: String,
+        result: Result<(), String>,
+    },
+    WizardTestComplete {
         result: Result<(), String>,
     },
     ProbeComplete {
@@ -45,7 +52,6 @@ pub enum View {
     Help,
     Error {
         message: String,
-        underlying: Box<View>,
     },
     /// Shown when the system keyring is unavailable and the user must explicitly
     /// accept or decline file-based credential storage before anything is written.
@@ -137,28 +143,6 @@ pub struct WizardState {
     pub error: Option<String>,
 }
 
-impl WizardState {
-    pub fn new() -> Self {
-        WizardState {
-            step: WizardStep::Name,
-            name: String::new(),
-            address: String::new(),
-            user: String::new(),
-            file_path: String::new(),
-            file_name: String::new(),
-            target_cluster_ip: String::new(),
-            context_name: String::new(),
-            auth_method: AuthMethod::Password,
-            auth_input_focused: false,
-            help_open: false,
-            password_input: MaskedInput::new(),
-            identity_file_input: String::new(),
-            testing: false,
-            test_passed: false,
-            error: None,
-        }
-    }
-}
 
 #[derive(Clone, PartialEq, Default)]
 pub enum WizardStep {

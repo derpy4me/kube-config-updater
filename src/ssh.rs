@@ -4,24 +4,26 @@ use std::net::TcpStream;
 use std::path::Path;
 use std::time::Duration;
 
-/// Fetches the content of a file from a remote server using SSH.
+/// Fetches the content of a file from a remote server over SSH.
 ///
-/// This function connects to a remote server, authenticates using either a private key
-/// or an SSH agent, and then executes a `cat` command to retrieve the content of the
-/// specified file. It includes timeouts for the connection and SSH operations.
+/// Authentication priority: identity file → password → SSH agent.
+/// When a password is supplied, the remote command is `sudo -S cat <path>` and the
+/// password is written to the channel's stdin so sudo can read it. Otherwise plain
+/// `cat` is used.
 ///
 /// # Arguments
 ///
-/// * `server_name` - The name of the server, used for logging.
-/// * `server_address` - The address of the server to connect to.
-/// * `user` - The username to authenticate with.
-/// * `remote_path` - The absolute path of the file to fetch on the remote server.
-/// * `identity_file` - An optional path to an SSH private key file for authentication.
+/// * `server_name` - Used only for log messages.
+/// * `server_address` - SSH host (port 22, 10-second connect timeout).
+/// * `user` - Unix username for SSH authentication.
+/// * `remote_path` - Absolute path of the file to read on the remote host.
+/// * `identity_file` - Optional path to an SSH private key.
+/// * `password` - Optional SSH password; also used as the sudo password for `sudo -S cat`.
 ///
 /// # Returns
 ///
-/// A `Result` containing the file content as a `Vec<u8>` if successful,
-/// or an `anyhow::Error` if the connection, authentication, or file retrieval fails.
+/// The raw file content as `Vec<u8>`, or an `anyhow::Error` if connection,
+/// authentication, or the remote command fails.
 pub fn fetch_remote_file(
     server_name: &str,
     server_address: &str,

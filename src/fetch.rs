@@ -186,9 +186,7 @@ pub(crate) fn process_servers(
                 failed += 1;
                 log::error!("[{}] FAILED: {}", server.name, e);
                 let e_str = format!("{:#}", e);
-                let status = if e_str.to_lowercase().contains("authentication failed")
-                    || e_str.to_lowercase().contains("auth rejected")
-                {
+                let status = if crate::state::is_auth_error(&e_str) {
                     crate::state::RunStatus::AuthRejected
                 } else {
                     crate::state::RunStatus::Failed

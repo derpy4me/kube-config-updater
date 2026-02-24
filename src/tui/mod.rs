@@ -89,6 +89,19 @@ fn run_app(mut app: AppState) -> anyhow::Result<()> {
     result
 }
 
+/// Record pre-fetch cert state, mark server as in-progress, and spawn a forced fetch.
+/// Centralises the three-step setup that every fetch-triggering key handler needs.
+pub(crate) fn start_fetch(
+    app: &mut AppState,
+    server: crate::config::Server,
+    tx: &mpsc::Sender<AppEvent>,
+) {
+    let name = server.name.clone();
+    app.pre_fetch_expiry.insert(name.clone(), app.cert_cache.get(&name).copied().flatten());
+    app.in_progress.insert(name);
+    spawn_fetch(server, app.config.clone(), app.dry_run, true, tx.clone());
+}
+
 pub(crate) fn spawn_fetch(
     server: crate::config::Server,
     config: crate::config::Config,
@@ -184,62 +197,45 @@ fn event_loop(
             }
             Ok(AppEvent::FetchComplete { server_name, result }) => {
                 app.in_progress.remove(&server_name);
-                if server_name != "__wizard__" {
-                    let run_state = match &result {
-                        Ok(()) => state::ServerRunState {
-                            status: state::RunStatus::Fetched,
+                let run_state = match &result {
+                    Ok(()) => state::ServerRunState {
+                        status: state::RunStatus::Fetched,
+                        last_updated: Some(chrono::Utc::now()),
+                        error: None,
+                    },
+                    Err(msg) => {
+                        let status = if crate::state::is_auth_error(msg) {
+                            state::RunStatus::AuthRejected
+                        } else {
+                            state::RunStatus::Failed
+                        };
+                        state::ServerRunState {
+                            status,
                             last_updated: Some(chrono::Utc::now()),
-                            error: None,
-                        },
-                        Err(msg) => {
-                            let status = if msg.to_lowercase().contains("password rejected")
-                                || msg.to_lowercase().contains("authentication")
-                            {
-                                state::RunStatus::AuthRejected
-                            } else {
-                                state::RunStatus::Failed
-                            };
-                            state::ServerRunState {
-                                status,
-                                last_updated: Some(chrono::Utc::now()),
-                                error: Some(msg.clone()),
-                            }
-                        }
-                    };
-                    // Refresh cert cache directly from the kube file
-                    let mut local_path = std::path::PathBuf::from(&app.config.local_output_dir);
-                    local_path.push(&server_name);
-                    let new_expiry = match crate::kube::check_local_cert_expiry(&local_path) {
-                        crate::kube::CertStatus::Valid(exp) | crate::kube::CertStatus::Expired(exp) => Some(exp),
-                        _ => None,
-                    };
-                    app.cert_cache.insert(server_name.clone(), new_expiry);
-                    // Build delta notification before consuming pre_fetch_expiry
-                    let pre = app.pre_fetch_expiry.remove(&server_name);
-                    let notif = build_fetch_notification(&server_name, pre, new_expiry, result.is_ok());
-                    app.flash_rows.insert(server_name.clone(), 3);
-                    app.server_states.insert(server_name.clone(), run_state.clone());
-                    app.notification = Some((notif, std::time::Instant::now()));
-                    if let Err(e) = state::update_server_state(&server_name, run_state) {
-                        log::warn!("Could not write state file: {}", e);
-                    }
-                } else {
-                    // wizard test result
-                    if let View::Wizard(ws) = &mut app.view {
-                        ws.testing = false;
-                        app.in_progress.remove("__wizard__");
-                        match result {
-                            Ok(()) => {
-                                ws.test_passed = true;
-                                ws.error = None;
-                            }
-                            Err(msg) => {
-                                ws.test_passed = false;
-                                ws.error = Some(msg);
-                            }
+                            error: Some(msg.clone()),
                         }
                     }
+                };
+                // Refresh cert cache directly from the kube file
+                let mut local_path = std::path::PathBuf::from(&app.config.local_output_dir);
+                local_path.push(&server_name);
+                let new_expiry = match crate::kube::check_local_cert_expiry(&local_path) {
+                    crate::kube::CertStatus::Valid(exp) | crate::kube::CertStatus::Expired(exp) => Some(exp),
+                    _ => None,
+                };
+                app.cert_cache.insert(server_name.clone(), new_expiry);
+                // Build delta notification before consuming pre_fetch_expiry
+                let pre = app.pre_fetch_expiry.remove(&server_name);
+                let notif = build_fetch_notification(&server_name, pre, new_expiry, result.is_ok());
+                app.flash_rows.insert(server_name.clone(), 3);
+                app.server_states.insert(server_name.clone(), run_state.clone());
+                app.notification = Some((notif, std::time::Instant::now()));
+                if let Err(e) = state::update_server_state(&server_name, run_state) {
+                    log::warn!("Could not write state file: {}", e);
                 }
+            }
+            Ok(AppEvent::WizardTestComplete { result }) => {
+                features::wizard::on_test_complete(app, result);
             }
             Ok(AppEvent::StateFileChanged) => {
                 match state::read_state() {
@@ -281,7 +277,7 @@ fn render_app(frame: &mut ratatui::Frame, app: &mut AppState) {
         View::Wizard(_) => ViewKind::Wizard,
         View::SetupWizard(_) => ViewKind::SetupWizard,
         View::Help => ViewKind::Help,
-        View::Error { message, .. } => ViewKind::ErrorView(message.clone()),
+        View::Error { message } => ViewKind::ErrorView(message.clone()),
         View::CredentialMenu(name) => ViewKind::CredentialMenu(name.clone()),
         View::CredentialInput(name) => ViewKind::CredentialInput(name.clone()),
         View::DeleteConfirm(name) => ViewKind::DeleteConfirm(name.clone()),
@@ -372,9 +368,6 @@ pub fn friendly_error(e: &anyhow::Error) -> String {
     let s = format!("{:#}", e);
     let lower = s.to_lowercase();
     if lower.contains("connection refused") || lower.contains("timed out") || lower.contains("no route") {
-        if let Some(host) = extract_host(&s) {
-            return format!("Could not reach {} — is the host up and reachable from this machine?", host);
-        }
         return "Could not reach host — is it up and reachable from this machine?".to_string();
     }
     if lower.contains("authentication failed") || lower.contains("auth rejected") {
@@ -396,7 +389,3 @@ pub fn friendly_error(e: &anyhow::Error) -> String {
     s
 }
 
-fn extract_host(_error: &str) -> Option<String> {
-    // Simple heuristic: look for a hostname-like word after "connect" or similar
-    None // TODO: implement if needed
-}

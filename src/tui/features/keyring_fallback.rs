@@ -119,7 +119,6 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> bool {
                 Err(e) => {
                     app.view = View::Error {
                         message: format!("Could not write credentials file: {}", e),
-                        underlying: Box::new(View::Dashboard),
                     };
                     return false;
                 }

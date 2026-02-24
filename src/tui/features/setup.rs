@@ -236,7 +236,7 @@ fn setup_write(app: &mut AppState, ws: &SetupWizardState) {
     match crate::config::load_config(app.config_path.to_str().unwrap_or_default()) {
         Ok(config) => {
             app.config = config;
-            app.view = View::Wizard(WizardState::new());
+            app.view = View::Wizard(WizardState::default());
         }
         Err(e) => {
             let mut ws_err = ws.clone();

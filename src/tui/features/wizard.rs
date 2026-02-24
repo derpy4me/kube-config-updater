@@ -9,7 +9,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::tui::app::{AppEvent, AppState, AuthMethod, View, WizardState, WizardStep};
+use crate::tui::app::{AppEvent, AppState, AuthMethod, View, WizardState, WizardStep, WIZARD_SENTINEL};
 use super::{centered_rect, render_dim_background};
 
 pub fn render(frame: &mut Frame, app: &mut AppState, wizard: &WizardState) {
@@ -254,23 +254,17 @@ fn render_error_area(
     wizard: &WizardState,
     area: ratatui::layout::Rect,
 ) {
-    let err_rows = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .split(area);
-
     if let Some(ref err_msg) = wizard.error {
         let style = if app.use_color {
             Style::default().fg(Color::Red)
         } else {
             Style::default()
         };
-        let err_line = Paragraph::new(format!("  {}", err_msg)).style(style).wrap(Wrap { trim: true });
-        frame.render_widget(err_line, err_rows[0]);
+        frame.render_widget(
+            Paragraph::new(format!("  {}", err_msg)).style(style).wrap(Wrap { trim: true }),
+            area,
+        );
     }
-    // second row stays blank
-    let _ = err_rows[1];
 }
 
 fn render_footer(frame: &mut Frame, wizard: &WizardState, area: ratatui::layout::Rect) {
@@ -332,7 +326,7 @@ pub fn handle_key(
                         ws.error = None;
                         let ws_snap = ws.clone();
                         let default_user = app.config.default_user.clone();
-                        app.in_progress.insert("__wizard__".to_string());
+                        app.in_progress.insert(WIZARD_SENTINEL.to_string());
                         app.view = View::Wizard(ws);
                         spawn_wizard_test(ws_snap, default_user, tx.clone());
                     } else {
@@ -376,7 +370,7 @@ pub fn handle_key(
                         ws.error = None;
                         let ws_snap = ws.clone();
                         let default_user = app.config.default_user.clone();
-                        app.in_progress.insert("__wizard__".to_string());
+                        app.in_progress.insert(WIZARD_SENTINEL.to_string());
                         app.view = View::Wizard(ws);
                         spawn_wizard_test(ws_snap, default_user, tx.clone());
                     }
@@ -451,14 +445,24 @@ pub fn handle_key(
     false
 }
 
+/// Called by the event loop when a wizard connection test completes.
+/// Keeps wizard-specific result handling in the wizard module, not in mod.rs.
+pub fn on_test_complete(app: &mut AppState, result: Result<(), String>) {
+    app.in_progress.remove(WIZARD_SENTINEL);
+    if let View::Wizard(ws) = &mut app.view {
+        ws.testing = false;
+        match result {
+            Ok(()) => { ws.test_passed = true; ws.error = None; }
+            Err(msg) => { ws.test_passed = false; ws.error = Some(msg); }
+        }
+    }
+}
+
 fn spawn_wizard_test(ws: WizardState, default_user: Option<String>, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || {
-        let result = do_wizard_connection_test(&ws, default_user);
-        tx.send(AppEvent::FetchComplete {
-            server_name: "__wizard__".to_string(),
-            result: result.map_err(|e| crate::tui::friendly_error(&e)),
-        })
-        .ok();
+        let result = do_wizard_connection_test(&ws, default_user)
+            .map_err(|e| crate::tui::friendly_error(&e));
+        tx.send(AppEvent::WizardTestComplete { result }).ok();
     });
 }
 
@@ -514,7 +518,6 @@ fn wizard_save(app: &mut AppState, ws: &WizardState) {
     if let Err(e) = crate::config::add_server(&app.config_path, &server) {
         app.view = View::Error {
             message: format!("Couldn't save server: {}", e),
-            underlying: Box::new(View::Dashboard),
         };
         return;
     }
@@ -539,8 +542,7 @@ fn wizard_save(app: &mut AppState, ws: &WizardState) {
                          Set it from the dashboard with 'c'.",
                         ws.name, e
                     ),
-                    underlying: Box::new(View::Dashboard),
-                };
+                        };
             }
             return;
         }
@@ -559,8 +561,7 @@ fn wizard_save(app: &mut AppState, ws: &WizardState) {
         Err(e) => {
             app.view = View::Error {
                 message: format!("Server saved but config reload failed: {}", e),
-                underlying: Box::new(View::Dashboard),
-            };
+                };
             return;
         }
     }

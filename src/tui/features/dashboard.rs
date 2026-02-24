@@ -253,23 +253,13 @@ pub fn handle_key(
                 && !app.in_progress.contains(&name)
                 && let Some(server) = app.config.servers.iter().find(|s| s.name == name).cloned()
             {
-                app.pre_fetch_expiry.insert(
-                    name.clone(),
-                    app.cert_cache.get(&name).copied().flatten(),
-                );
-                app.in_progress.insert(name);
-                crate::tui::spawn_fetch(server, app.config.clone(), app.dry_run, true, tx.clone());
+                crate::tui::start_fetch(app, server, tx);
             }
         }
         KeyCode::Char('F') => {
             for server in app.config.servers.clone() {
                 if !app.in_progress.contains(&server.name) {
-                    app.pre_fetch_expiry.insert(
-                        server.name.clone(),
-                        app.cert_cache.get(&server.name).copied().flatten(),
-                    );
-                    app.in_progress.insert(server.name.clone());
-                    crate::tui::spawn_fetch(server, app.config.clone(), app.dry_run, true, tx.clone());
+                    crate::tui::start_fetch(app, server, tx);
                 }
             }
         }
@@ -284,7 +274,7 @@ pub fn handle_key(
             app.notification = Some((msg.to_string(), std::time::Instant::now()));
         }
         KeyCode::Char('a') => {
-            app.view = View::Wizard(WizardState::new());
+            app.view = View::Wizard(WizardState::default());
         }
         KeyCode::Char('D') => {
             if let Some(name) = selected_name {
@@ -320,10 +310,7 @@ fn perform_delete(app: &mut AppState, server_name: &str) {
     // Remove from config.toml
     if let Err(e) = crate::config::remove_server(&app.config_path, server_name) {
         let msg = format!("Couldn't delete server: {}", e);
-        app.view = View::Error {
-            message: msg,
-            underlying: Box::new(View::Dashboard),
-        };
+        app.view = View::Error { message: msg };
         return;
     }
 
@@ -378,7 +365,6 @@ fn open_editor(terminal: &mut ratatui::DefaultTerminal, app: &mut AppState) {
         Err(e) => {
             app.view = View::Error {
                 message: format!("config.toml could not be read after edit: {}", e),
-                underlying: Box::new(View::Dashboard),
             };
         }
     }

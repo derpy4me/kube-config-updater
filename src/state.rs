@@ -41,6 +41,14 @@ pub fn write_state(states: &HashMap<String, ServerRunState>) -> Result<(), anyho
     Ok(())
 }
 
+/// Returns true when an error message indicates SSH authentication failure.
+/// Used by both the CLI fetch loop and the TUI event handler to classify
+/// `RunStatus::AuthRejected` vs `RunStatus::Failed`.
+pub fn is_auth_error(msg: &str) -> bool {
+    let lower = msg.to_lowercase();
+    lower.contains("authentication failed") || lower.contains("auth rejected")
+}
+
 /// Read the current state, update one entry, write back.
 pub fn update_server_state(name: &str, state: ServerRunState) -> Result<(), anyhow::Error> {
     let mut states = read_state()?;

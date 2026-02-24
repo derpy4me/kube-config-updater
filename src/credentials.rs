@@ -374,9 +374,10 @@ pub fn delete_credential_with(
 ///
 /// Returns a map of server name to credential availability status.
 pub fn check_credentials<'a>(server_names: &'a [&'a str]) -> Vec<(&'a str, CredentialResult)> {
-    check_credentials_with(server_names, &RealKeyring)
+    server_names.iter().map(|&name| (name, get_credential(name))).collect()
 }
 
+#[cfg(test)]
 pub fn check_credentials_with<'a>(
     server_names: &[&'a str],
     backend: &dyn KeyringBackend,
