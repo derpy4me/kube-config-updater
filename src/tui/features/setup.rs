@@ -2,14 +2,14 @@ use std::sync::mpsc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
+    Frame,
     layout::{Constraint, Layout},
     style::{Color, Style},
     widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
-    Frame,
 };
 
-use crate::tui::app::{AppEvent, AppState, SetupStep, SetupWizardState, View, WizardState};
 use super::centered_rect;
+use crate::tui::app::{AppEvent, AppState, SetupStep, SetupWizardState, View, WizardState};
 
 pub fn render(frame: &mut Frame, app: &AppState, wizard: &SetupWizardState) {
     let area = frame.area();
@@ -50,7 +50,12 @@ pub fn render(frame: &mut Frame, app: &AppState, wizard: &SetupWizardState) {
         } else {
             Style::default()
         };
-        frame.render_widget(Paragraph::new(format!("  {}", err)).style(style).wrap(Wrap { trim: true }), rows[3]);
+        frame.render_widget(
+            Paragraph::new(format!("  {}", err))
+                .style(style)
+                .wrap(Wrap { trim: true }),
+            rows[3],
+        );
     }
 
     let hints = match wizard.step {
@@ -68,16 +73,18 @@ fn render_step_indicator(frame: &mut Frame, wizard: &SetupWizardState, area: rat
 
     let dots: String = (0..total)
         .map(|i| {
-            if i < current_idx { '●' } else if i == current_idx { '◉' } else { '○' }
+            if i < current_idx {
+                '●'
+            } else if i == current_idx {
+                '◉'
+            } else {
+                '○'
+            }
         })
         .collect();
 
     let dots_len = dots.chars().count() as u16;
-    let cols = Layout::horizontal([
-        Constraint::Fill(1),
-        Constraint::Length(dots_len),
-    ])
-    .split(area);
+    let cols = Layout::horizontal([Constraint::Fill(1), Constraint::Length(dots_len)]).split(area);
 
     frame.render_widget(Paragraph::new(label), cols[0]);
     frame.render_widget(Paragraph::new(dots), cols[1]);
@@ -115,25 +122,15 @@ fn render_content(frame: &mut Frame, wizard: &SetupWizardState, area: ratatui::l
     ])
     .split(area);
 
-    frame.render_widget(
-        Paragraph::new(format!("  {}:", field_label)),
-        content_rows[0],
-    );
-    frame.render_widget(
-        Paragraph::new(format!("  > {}│", value)),
-        content_rows[1],
-    );
+    frame.render_widget(Paragraph::new(format!("  {}:", field_label)), content_rows[0]);
+    frame.render_widget(Paragraph::new(format!("  > {}│", value)), content_rows[1]);
     frame.render_widget(
         Paragraph::new(format!("  {}", hint)).wrap(Wrap { trim: true }),
         content_rows[3],
     );
 }
 
-pub fn handle_key(
-    app: &mut AppState,
-    key: KeyEvent,
-    _tx: &mpsc::Sender<AppEvent>,
-) -> bool {
+pub fn handle_key(app: &mut AppState, key: KeyEvent, _tx: &mpsc::Sender<AppEvent>) -> bool {
     let ws = match &app.view {
         View::SetupWizard(ws) => ws.clone(),
         _ => return false,
@@ -173,10 +170,18 @@ pub fn handle_key(
         KeyCode::Backspace => {
             let mut ws = ws;
             match ws.step {
-                SetupStep::OutputDir => { ws.output_dir.pop(); }
-                SetupStep::DefaultUser => { ws.default_user.pop(); }
-                SetupStep::DefaultFilePath => { ws.default_file_path.pop(); }
-                SetupStep::DefaultFileName => { ws.default_file_name.pop(); }
+                SetupStep::OutputDir => {
+                    ws.output_dir.pop();
+                }
+                SetupStep::DefaultUser => {
+                    ws.default_user.pop();
+                }
+                SetupStep::DefaultFilePath => {
+                    ws.default_file_path.pop();
+                }
+                SetupStep::DefaultFileName => {
+                    ws.default_file_name.pop();
+                }
             };
             ws.error = None;
             app.view = View::SetupWizard(ws);
@@ -215,10 +220,16 @@ fn build_config_toml(ws: &SetupWizardState) -> String {
         toml.push_str(&format!("default_user = \"{}\"\n", toml_escape(ws.default_user.trim())));
     }
     if !ws.default_file_path.trim().is_empty() {
-        toml.push_str(&format!("default_file_path = \"{}\"\n", toml_escape(ws.default_file_path.trim())));
+        toml.push_str(&format!(
+            "default_file_path = \"{}\"\n",
+            toml_escape(ws.default_file_path.trim())
+        ));
     }
     if !ws.default_file_name.trim().is_empty() {
-        toml.push_str(&format!("default_file_name = \"{}\"\n", toml_escape(ws.default_file_name.trim())));
+        toml.push_str(&format!(
+            "default_file_name = \"{}\"\n",
+            toml_escape(ws.default_file_name.trim())
+        ));
     }
     toml
 }
@@ -287,13 +298,19 @@ mod tests {
 
     #[test]
     fn test_validate_rejects_whitespace_only_output_dir() {
-        let ws = SetupWizardState { output_dir: "   ".to_string(), ..Default::default() };
+        let ws = SetupWizardState {
+            output_dir: "   ".to_string(),
+            ..Default::default()
+        };
         assert!(validate(&ws).is_some());
     }
 
     #[test]
     fn test_validate_accepts_non_empty_output_dir() {
-        let ws = SetupWizardState { output_dir: "/home/user/.kube".to_string(), ..Default::default() };
+        let ws = SetupWizardState {
+            output_dir: "/home/user/.kube".to_string(),
+            ..Default::default()
+        };
         assert!(validate(&ws).is_none());
     }
 
@@ -304,7 +321,11 @@ mod tests {
             ..Default::default()
         };
 
-        for step in [SetupStep::DefaultUser, SetupStep::DefaultFilePath, SetupStep::DefaultFileName] {
+        for step in [
+            SetupStep::DefaultUser,
+            SetupStep::DefaultFilePath,
+            SetupStep::DefaultFileName,
+        ] {
             let ws = SetupWizardState { step, ..base.clone() };
             assert!(validate(&ws).is_none(), "blank optional step should pass validation");
         }
@@ -378,8 +399,8 @@ mod tests {
         };
         let tmp = NamedTempFile::new().expect("temp file");
         std::fs::write(tmp.path(), build_config_toml(&ws)).expect("write");
-        let config = crate::config::load_config(tmp.path().to_str().unwrap())
-            .expect("path with quotes must survive round-trip");
+        let config =
+            crate::config::load_config(tmp.path().to_str().unwrap()).expect("path with quotes must survive round-trip");
         assert_eq!(config.local_output_dir, r#"/home/user/my "special" dir"#);
     }
 
@@ -412,8 +433,8 @@ mod tests {
         let tmp = NamedTempFile::new().expect("temp file");
         std::fs::write(tmp.path(), build_config_toml(&ws)).expect("write");
 
-        let config = crate::config::load_config(tmp.path().to_str().unwrap())
-            .expect("setup wizard TOML should parse cleanly");
+        let config =
+            crate::config::load_config(tmp.path().to_str().unwrap()).expect("setup wizard TOML should parse cleanly");
 
         assert_eq!(config.local_output_dir, "/tmp/kube");
         assert_eq!(config.default_user.as_deref(), Some("ubuntu"));
@@ -434,8 +455,7 @@ mod tests {
         let tmp = NamedTempFile::new().expect("temp file");
         std::fs::write(tmp.path(), build_config_toml(&ws)).expect("write");
 
-        let config = crate::config::load_config(tmp.path().to_str().unwrap())
-            .expect("minimal setup TOML must parse");
+        let config = crate::config::load_config(tmp.path().to_str().unwrap()).expect("minimal setup TOML must parse");
 
         assert_eq!(config.local_output_dir, "/tmp/kube");
         assert!(config.default_user.is_none());

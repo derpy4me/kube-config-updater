@@ -1,5 +1,5 @@
 use anyhow::Context as _;
-use base64::{engine::general_purpose, Engine as _};
+use base64::{Engine as _, engine::general_purpose};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -157,10 +157,7 @@ fn add_cert_expiration(kubeconfig: &mut KubeConfig) -> Result<(), anyhow::Error>
     let user_name = &context_entry.context.user;
 
     let Some(user_info) = kubeconfig.users.iter().find(|u| u.name == *user_name) else {
-        log::warn!(
-            "Could not find user '{}' to extract cert expiry — skipping",
-            user_name
-        );
+        log::warn!("Could not find user '{}' to extract cert expiry — skipping", user_name);
         return Ok(());
     };
 
@@ -236,7 +233,11 @@ fn update_context_info(kubeconfig: &mut KubeConfig, unique_name: &str) -> Result
     }
 
     if let Some(context_info) = kubeconfig.contexts.get_mut(0) {
-        log::info!("Updating context name from '{}' to '{}'", context_info.name, unique_name);
+        log::info!(
+            "Updating context name from '{}' to '{}'",
+            context_info.name,
+            unique_name
+        );
         context_info.name = unique_name.to_string();
         context_info.context.cluster = unique_name.to_string();
         context_info.context.user = unique_name.to_string();
@@ -300,10 +301,7 @@ pub fn process_kubeconfig_file(
     let updated_content = serde_yaml::to_string(&kubeconfig)?;
 
     if dry_run {
-        log::info!(
-            "DRY-RUN: Would have updated kubeconfig file at {:?}",
-            local_path
-        );
+        log::info!("DRY-RUN: Would have updated kubeconfig file at {:?}", local_path);
         // Optionally, you could print the diff or the would-be content here
         // log::info!("---\n{}---", updated_content);
     } else {
@@ -328,7 +326,9 @@ pub fn parse_cert_expiry_from_bytes(content: &[u8]) -> Option<chrono::DateTime<c
     let user_name = &context_entry.context.user;
     let user_info = kubeconfig.users.iter().find(|u| u.name == *user_name)?;
 
-    let pem_data = general_purpose::STANDARD.decode(&user_info.user.certificate_data).ok()?;
+    let pem_data = general_purpose::STANDARD
+        .decode(&user_info.user.certificate_data)
+        .ok()?;
     let (_, pem) = parse_x509_pem(&pem_data).ok()?;
     let cert = pem.parse_x509().ok()?;
     let timestamp = cert.validity().not_after.to_datetime().unix_timestamp();
@@ -338,11 +338,7 @@ pub fn parse_cert_expiry_from_bytes(content: &[u8]) -> Option<chrono::DateTime<c
 /// Merges cluster, context, and user entries from a fetched per-server kubeconfig
 /// into the main ~/.kube/config file. Existing entries with the same name are replaced.
 /// Preferences and current_context in the main config are never modified.
-pub fn merge_into_main_kubeconfig(
-    fetched_path: &Path,
-    server_name: &str,
-    dry_run: bool,
-) -> Result<(), anyhow::Error> {
+pub fn merge_into_main_kubeconfig(fetched_path: &Path, server_name: &str, dry_run: bool) -> Result<(), anyhow::Error> {
     if dry_run && !fetched_path.exists() {
         log::info!(
             "[{}] DRY-RUN: Would merge processed config into ~/.kube/config",
@@ -402,11 +398,9 @@ pub fn merge_into_main_kubeconfig(
     } else {
         let updated = serde_yaml::to_string(&main_config)?;
         if let Some(parent) = main_config_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("creating directory {:?}", parent))?;
+            fs::create_dir_all(parent).with_context(|| format!("creating directory {:?}", parent))?;
         }
-        fs::write(&main_config_path, updated)
-            .with_context(|| format!("writing {:?}", main_config_path))?;
+        fs::write(&main_config_path, updated).with_context(|| format!("writing {:?}", main_config_path))?;
         log::info!("[{}] Merged cluster/context/user into ~/.kube/config", server_name);
     }
 

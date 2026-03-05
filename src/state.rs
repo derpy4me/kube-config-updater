@@ -1,7 +1,7 @@
-use std::collections::HashMap;
-use std::path::Path;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::Path;
 
 pub const STATE_FILE: &str = "/tmp/kube_config_updater_state.json";
 const STATE_FILE_TMP: &str = "/tmp/kube_config_updater_state.json.tmp";
@@ -88,11 +88,14 @@ mod tests {
         let _guard = STATE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut states = HashMap::new();
         states.insert("server1".to_string(), make_state(RunStatus::Fetched));
-        states.insert("server2".to_string(), ServerRunState {
-            status: RunStatus::Failed,
-            last_updated: Some(Utc::now()),
-            error: Some("Connection refused".to_string()),
-        });
+        states.insert(
+            "server2".to_string(),
+            ServerRunState {
+                status: RunStatus::Failed,
+                last_updated: Some(Utc::now()),
+                error: Some("Connection refused".to_string()),
+            },
+        );
 
         write_state(&states).expect("write should succeed");
         let loaded = read_state().expect("read should succeed");
@@ -111,8 +114,7 @@ mod tests {
         write_state(&initial).expect("write should succeed");
 
         // Update should add server2 without removing server1
-        update_server_state("new_server", make_state(RunStatus::Fetched))
-            .expect("update should succeed");
+        update_server_state("new_server", make_state(RunStatus::Fetched)).expect("update should succeed");
 
         let loaded = read_state().expect("read should succeed");
         assert!(loaded.contains_key("existing"));

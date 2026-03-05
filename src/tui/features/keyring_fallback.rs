@@ -1,14 +1,14 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
+    Frame,
     layout::{Constraint, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
-    Frame,
 };
 
-use crate::tui::app::{AppState, View};
 use super::{centered_rect, render_dim_background};
+use crate::tui::app::{AppState, View};
 
 pub fn render(frame: &mut Frame, app: &AppState, server_name: &str, keyring_error: &str) {
     let area = frame.area();
@@ -101,9 +101,9 @@ pub fn render(frame: &mut Frame, app: &AppState, server_name: &str, keyring_erro
 
 pub fn handle_key(app: &mut AppState, key: KeyEvent) -> bool {
     let (server_name, password) = match &app.view {
-        View::KeyringFallbackConsent { server_name, password, .. } => {
-            (server_name.clone(), password.clone())
-        }
+        View::KeyringFallbackConsent {
+            server_name, password, ..
+        } => (server_name.clone(), password.clone()),
         _ => return false,
     };
 

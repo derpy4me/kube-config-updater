@@ -1,13 +1,13 @@
 use crossterm::event::KeyEvent;
 use ratatui::{
+    Frame,
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, Paragraph},
-    Frame,
 };
 
-use crate::tui::app::{AppState, View};
 use super::{centered_rect, render_dim_background};
+use crate::tui::app::{AppState, View};
 
 pub fn render(frame: &mut Frame, app: &mut AppState) {
     render_dim_background(frame, frame.area());
@@ -49,11 +49,7 @@ pub fn render(frame: &mut Frame, app: &mut AppState) {
         ("?          ", "Show this help"),
         ("q/^C/^D    ", "Quit"),
     ] {
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::raw(*keys),
-            Span::raw(*desc),
-        ]));
+        lines.push(Line::from(vec![Span::raw("  "), Span::raw(*keys), Span::raw(*desc)]));
     }
 
     lines.push(Line::raw(""));
@@ -67,11 +63,7 @@ pub fn render(frame: &mut Frame, app: &mut AppState) {
         ("c          ", "Manage credentials"),
         ("?          ", "Show this help"),
     ] {
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::raw(*keys),
-            Span::raw(*desc),
-        ]));
+        lines.push(Line::from(vec![Span::raw("  "), Span::raw(*keys), Span::raw(*desc)]));
     }
 
     lines.push(Line::raw(""));
@@ -83,11 +75,7 @@ pub fn render(frame: &mut Frame, app: &mut AppState) {
         ("Esc        ", "Previous step / cancel"),
         ("q          ", "Cancel wizard"),
     ] {
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::raw(*keys),
-            Span::raw(*desc),
-        ]));
+        lines.push(Line::from(vec![Span::raw("  "), Span::raw(*keys), Span::raw(*desc)]));
     }
 
     lines.push(Line::raw(""));
@@ -100,11 +88,7 @@ pub fn render(frame: &mut Frame, app: &mut AppState) {
         ("t          ", "Test connection"),
         ("s          ", "Save server (after test passes)"),
     ] {
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::raw(*keys),
-            Span::raw(*desc),
-        ]));
+        lines.push(Line::from(vec![Span::raw("  "), Span::raw(*keys), Span::raw(*desc)]));
     }
 
     lines.push(Line::raw(""));
@@ -120,10 +104,7 @@ pub fn render(frame: &mut Frame, app: &mut AppState) {
     lines.push(Line::raw(""));
 
     // ── Footer ────────────────────────────────────────────────────────────
-    lines.push(Line::from(vec![Span::styled(
-        "  [press any key to dismiss]",
-        dim,
-    )]));
+    lines.push(Line::from(vec![Span::styled("  [press any key to dismiss]", dim)]));
 
     let block = Block::default()
         .title("─ Help ─")
@@ -135,9 +116,5 @@ pub fn render(frame: &mut Frame, app: &mut AppState) {
 }
 
 pub fn handle_key(app: &mut AppState, _key: KeyEvent) {
-    app.view = app
-        .prior_view
-        .take()
-        .map(|b| *b)
-        .unwrap_or(View::Dashboard);
+    app.view = app.prior_view.take().map(|b| *b).unwrap_or(View::Dashboard);
 }
