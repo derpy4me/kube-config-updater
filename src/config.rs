@@ -16,6 +16,8 @@ pub struct Config {
     pub default_identity_file: Option<String>,
     /// The local directory where fetched kubeconfig files will be stored.
     pub local_output_dir: String,
+    #[serde(default)]
+    pub bitwarden: Option<crate::bitwarden::BitwardenConfig>,
     /// A list of server configurations to process.
     #[serde(rename = "server", default)]
     pub servers: Vec<Server>,
@@ -61,11 +63,9 @@ impl Server {
 
         let full_path = match (file_path, file_name) {
             (Some(p), Some(n)) => format!("{}/{}", p, n),
-            (Some(p), None)    => p.to_owned(),
-            (None,    None)    => "/etc/rancher/k3s/k3s.yaml".to_owned(),
-            (None,    Some(_)) => anyhow::bail!(
-                "[{}] file_name is set but file_path is missing", self.name
-            ),
+            (Some(p), None) => p.to_owned(),
+            (None, None) => "/etc/rancher/k3s/k3s.yaml".to_owned(),
+            (None, Some(_)) => anyhow::bail!("[{}] file_name is set but file_path is missing", self.name),
         };
 
         log::debug!("Remote file path: {}", full_path);
@@ -93,7 +93,10 @@ impl Server {
 pub fn load_config(path: &str) -> Result<Config, anyhow::Error> {
     match load_config_optional(path)? {
         Some(config) => Ok(config),
-        None => anyhow::bail!("Configuration file not found at '{}'. Run `kube_config_updater tui` to set up.", path),
+        None => anyhow::bail!(
+            "Configuration file not found at '{}'. Run `kube_config_updater tui` to set up.",
+            path
+        ),
     }
 }
 
@@ -119,7 +122,8 @@ pub fn load_config_optional(path: &str) -> Result<Option<Config>, anyhow::Error>
 /// Append a new [[server]] entry to config.toml, preserving existing comments and formatting.
 pub fn add_server(config_path: &PathBuf, server: &Server) -> Result<(), anyhow::Error> {
     let content = std::fs::read_to_string(config_path)?;
-    let mut doc: DocumentMut = content.parse()
+    let mut doc: DocumentMut = content
+        .parse()
         .map_err(|e| anyhow::anyhow!("Failed to parse config.toml: {}", e))?;
 
     // Build the new entry table
@@ -154,8 +158,13 @@ pub fn add_server(config_path: &PathBuf, server: &Server) -> Result<(), anyhow::
 
     // Write atomically
     let tmp = config_path.with_extension("toml.tmp");
-    std::fs::write(&tmp, doc.to_string())
-        .map_err(|e| anyhow::anyhow!("Couldn't save config.toml — check file permissions at {}: {}", config_path.display(), e))?;
+    std::fs::write(&tmp, doc.to_string()).map_err(|e| {
+        anyhow::anyhow!(
+            "Couldn't save config.toml — check file permissions at {}: {}",
+            config_path.display(),
+            e
+        )
+    })?;
     std::fs::rename(&tmp, config_path)?;
     Ok(())
 }
@@ -163,7 +172,8 @@ pub fn add_server(config_path: &PathBuf, server: &Server) -> Result<(), anyhow::
 /// Remove all [[server]] entries with the given name from config.toml.
 pub fn remove_server(config_path: &PathBuf, name: &str) -> Result<(), anyhow::Error> {
     let content = std::fs::read_to_string(config_path)?;
-    let mut doc: DocumentMut = content.parse()
+    let mut doc: DocumentMut = content
+        .parse()
         .map_err(|e| anyhow::anyhow!("Failed to parse config.toml: {}", e))?;
 
     if let Some(servers) = doc["server"].as_array_of_tables_mut() {
@@ -183,8 +193,13 @@ pub fn remove_server(config_path: &PathBuf, name: &str) -> Result<(), anyhow::Er
     }
 
     let tmp = config_path.with_extension("toml.tmp");
-    std::fs::write(&tmp, doc.to_string())
-        .map_err(|e| anyhow::anyhow!("Couldn't save config.toml — check file permissions at {}: {}", config_path.display(), e))?;
+    std::fs::write(&tmp, doc.to_string()).map_err(|e| {
+        anyhow::anyhow!(
+            "Couldn't save config.toml — check file permissions at {}: {}",
+            config_path.display(),
+            e
+        )
+    })?;
     std::fs::rename(&tmp, config_path)?;
     Ok(())
 }
@@ -217,8 +232,8 @@ mod config_tests {
     #[test]
     fn test_load_config_no_servers_defaults_to_empty() {
         let f = write_temp_config("local_output_dir = \"/tmp/kube\"\n");
-        let config = load_config(f.path().to_str().unwrap())
-            .expect("config with no [[server]] section should load cleanly");
+        let config =
+            load_config(f.path().to_str().unwrap()).expect("config with no [[server]] section should load cleanly");
         assert!(config.servers.is_empty());
         assert_eq!(config.local_output_dir, "/tmp/kube");
     }
@@ -230,8 +245,7 @@ mod config_tests {
                        default_file_path = \"/etc/rancher/k3s\"\n\
                        default_file_name = \"k3s.yaml\"\n";
         let f = write_temp_config(content);
-        let config = load_config(f.path().to_str().unwrap())
-            .expect("setup wizard output should load cleanly");
+        let config = load_config(f.path().to_str().unwrap()).expect("setup wizard output should load cleanly");
         assert!(config.servers.is_empty());
         assert_eq!(config.default_user.as_deref(), Some("ubuntu"));
         assert_eq!(config.default_file_path.as_deref(), Some("/etc/rancher/k3s"));
@@ -309,5 +323,32 @@ target_cluster_ip = "10.0.0.2"
         let result = load_config(path.to_str().unwrap()).expect("load should succeed");
         assert_eq!(result.servers.len(), 1);
         assert_eq!(result.servers[0].name, "keep-me");
+    }
+
+    #[test]
+    fn test_load_config_with_bitwarden_section() {
+        let content = r#"
+local_output_dir = "/tmp/kube"
+
+[bitwarden]
+enabled = true
+server_url = "https://vault.example.com"
+collection = "K3s Prod"
+item_prefix = "k3s:"
+"#;
+        let f = write_temp_config(content);
+        let config = load_config(f.path().to_str().unwrap()).expect("should parse");
+        let bw = config.bitwarden.expect("bitwarden section should be present");
+        assert!(bw.enabled);
+        assert_eq!(bw.server_url.as_deref(), Some("https://vault.example.com"));
+        assert_eq!(bw.collection.as_deref(), Some("K3s Prod"));
+        assert_eq!(bw.item_prefix.as_deref(), Some("k3s:"));
+    }
+
+    #[test]
+    fn test_load_config_without_bitwarden_section() {
+        let f = write_temp_config("local_output_dir = \"/tmp/kube\"\n");
+        let config = load_config(f.path().to_str().unwrap()).expect("should parse");
+        assert!(config.bitwarden.is_none());
     }
 }

@@ -1,3 +1,4 @@
+pub mod bitwarden;
 pub mod credentials;
 pub mod dashboard;
 pub mod detail;
@@ -7,10 +8,10 @@ pub mod setup;
 pub mod wizard;
 
 use ratatui::{
+    Frame,
     layout::{Constraint, Flex, Layout, Rect},
     style::{Color, Modifier, Style},
     widgets::Block,
-    Frame,
 };
 
 use crate::state::RunStatus;

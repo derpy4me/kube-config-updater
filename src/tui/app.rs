@@ -1,7 +1,8 @@
+use crossterm::event::KeyEvent;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use crossterm::event::KeyEvent;
 
+use crate::bitwarden::ServerSource;
 use crate::config::Config;
 use crate::state::ServerRunState;
 
@@ -27,6 +28,9 @@ pub enum AppEvent {
         result: Result<Option<chrono::DateTime<chrono::Utc>>, String>,
     },
     StateFileChanged,
+    BitwardenComplete {
+        result: Result<Vec<crate::bitwarden::VaultServer>, String>,
+    },
 }
 
 // ─── Probe State ──────────────────────────────────────────────────────────────
@@ -43,12 +47,12 @@ pub enum ProbeState {
 #[allow(clippy::large_enum_variant)]
 pub enum View {
     Dashboard,
-    Detail(String),              // server name
+    Detail(String), // server name
     Wizard(WizardState),
     SetupWizard(SetupWizardState),
-    CredentialMenu(String),      // server name
-    CredentialInput(String),     // server name
-    DeleteConfirm(String),       // server name
+    CredentialMenu(String),  // server name
+    CredentialInput(String), // server name
+    DeleteConfirm(String),   // server name
     Help,
     Error {
         message: String,
@@ -59,6 +63,9 @@ pub enum View {
         server_name: String,
         password: String,
         keyring_error: String,
+    },
+    BitwardenUnlock {
+        error: Option<String>,
     },
 }
 
@@ -143,7 +150,6 @@ pub struct WizardState {
     pub error: Option<String>,
 }
 
-
 #[derive(Clone, PartialEq, Default)]
 pub enum WizardStep {
     #[default]
@@ -226,11 +232,23 @@ pub struct MaskedInput {
 }
 
 impl MaskedInput {
-    pub fn new() -> Self { MaskedInput { value: String::new() } }
-    pub fn push(&mut self, c: char) { if self.value.len() < 256 { self.value.push(c); } }
-    pub fn pop(&mut self) { self.value.pop(); }
-    pub fn clear(&mut self) { self.value.clear(); }
-    pub fn masked_display(&self) -> String { "*".repeat(self.value.len()) }
+    pub fn new() -> Self {
+        MaskedInput { value: String::new() }
+    }
+    pub fn push(&mut self, c: char) {
+        if self.value.len() < 256 {
+            self.value.push(c);
+        }
+    }
+    pub fn pop(&mut self) {
+        self.value.pop();
+    }
+    pub fn clear(&mut self) {
+        self.value.clear();
+    }
+    pub fn masked_display(&self) -> String {
+        "*".repeat(self.value.len())
+    }
 }
 
 // ─── Spinner ──────────────────────────────────────────────────────────────────
@@ -243,9 +261,15 @@ pub struct SpinnerState {
 }
 
 impl SpinnerState {
-    pub fn new() -> Self { SpinnerState { frame: 0 } }
-    pub fn tick(&mut self) { self.frame = (self.frame + 1) % SPINNER_FRAMES.len(); }
-    pub fn current(&self) -> &str { SPINNER_FRAMES[self.frame] }
+    pub fn new() -> Self {
+        SpinnerState { frame: 0 }
+    }
+    pub fn tick(&mut self) {
+        self.frame = (self.frame + 1) % SPINNER_FRAMES.len();
+    }
+    pub fn current(&self) -> &str {
+        SPINNER_FRAMES[self.frame]
+    }
 }
 
 // ─── App State ────────────────────────────────────────────────────────────────
@@ -257,11 +281,11 @@ pub struct AppState {
     pub cert_cache: HashMap<String, Option<chrono::DateTime<chrono::Utc>>>,
     pub in_progress: HashSet<String>,
     pub view: View,
-    pub prior_view: Option<Box<View>>,  // saved when entering Help
+    pub prior_view: Option<Box<View>>, // saved when entering Help
     pub dry_run: bool,
     pub table_state: ratatui::widgets::TableState,
     pub spinner: SpinnerState,
-    pub flash_rows: HashMap<String, u8>,         // server_name → frames remaining
+    pub flash_rows: HashMap<String, u8>, // server_name → frames remaining
     pub notification: Option<(String, std::time::Instant)>,
     pub credential_input: MaskedInput,
     pub use_color: bool,
@@ -270,10 +294,21 @@ pub struct AppState {
     pub pre_fetch_expiry: HashMap<String, Option<chrono::DateTime<chrono::Utc>>>,
     /// Current server cert probe result shown in the detail view.
     pub probe: Option<(String, ProbeState)>,
+    /// Tracks whether each server came from config.toml or Bitwarden vault.
+    pub server_sources: HashMap<String, ServerSource>,
+    /// Passwords sourced from Bitwarden vault, keyed by server name.
+    pub vault_passwords: HashMap<String, String>,
+    /// Bitwarden session key (held in memory only).
+    pub bw_session: Option<String>,
 }
 
 impl AppState {
-    pub fn new(config: Config, config_path: PathBuf, server_states: HashMap<String, ServerRunState>, dry_run: bool) -> Self {
+    pub fn new(
+        config: Config,
+        config_path: PathBuf,
+        server_states: HashMap<String, ServerRunState>,
+        dry_run: bool,
+    ) -> Self {
         let use_color = std::env::var("NO_COLOR").is_err();
         AppState {
             config,
@@ -293,6 +328,9 @@ impl AppState {
             last_state_mtime: None,
             pre_fetch_expiry: HashMap::new(),
             probe: None,
+            server_sources: HashMap::new(),
+            vault_passwords: HashMap::new(),
+            bw_session: None,
         }
     }
 

@@ -20,6 +20,7 @@ pub(crate) fn process_server(
     config: &crate::config::Config,
     dry_run: bool,
     force: bool,
+    vault_password: Option<&str>,
 ) -> Result<ServerResult, anyhow::Error> {
     let user = server.user(config)?;
     let remote_path_str = server.file_path(config)?;
@@ -44,17 +45,17 @@ pub(crate) fn process_server(
         }
     }
 
-    // Step 2: Look up credential from keyring
-    let password: Option<String> = match crate::credentials::get_credential(&server.name) {
-        crate::credentials::CredentialResult::Found(pw) => Some(pw),
-        crate::credentials::CredentialResult::NotFound => None,
-        crate::credentials::CredentialResult::Unavailable(reason) => {
-            log::warn!(
-                "[{}] Keyring unavailable ({}). Skipping. Run 'credential set' or log in to unlock keyring.",
-                server.name,
-                reason
-            );
-            return Ok(ServerResult::Skipped(SkipReason::KeyringUnavailable));
+    // Step 2: Look up credential
+    let password: Option<String> = if let Some(pw) = vault_password {
+        Some(pw.to_string())
+    } else {
+        match crate::credentials::get_credential(&server.name) {
+            crate::credentials::CredentialResult::Found(pw) => Some(pw),
+            crate::credentials::CredentialResult::NotFound => None,
+            crate::credentials::CredentialResult::Unavailable(reason) => {
+                log::warn!("[{}] Keyring unavailable ({}). Skipping.", server.name, reason);
+                return Ok(ServerResult::Skipped(SkipReason::KeyringUnavailable));
+            }
         }
     };
 
@@ -80,8 +81,7 @@ pub(crate) fn process_server(
     } else {
         fs::create_dir_all(&config.local_output_dir)
             .with_context(|| format!("creating output directory {:?}", config.local_output_dir))?;
-        fs::write(&local_path, &contents)
-            .with_context(|| format!("writing config to {:?}", local_path))?;
+        fs::write(&local_path, &contents).with_context(|| format!("writing config to {:?}", local_path))?;
         log::info!("[{}] Config written to {:?}", server.name, local_path);
     }
 
@@ -109,6 +109,7 @@ pub(crate) fn process_servers(
     config: &crate::config::Config,
     servers_to_process: &[String],
     dry_run: bool,
+    vault_passwords: &std::collections::HashMap<String, String>,
 ) -> Result<(), anyhow::Error> {
     fs::create_dir_all(&config.local_output_dir)?;
     log::info!("Using output directory: {}", &config.local_output_dir);
@@ -138,7 +139,13 @@ pub(crate) fn process_servers(
     let results: Vec<_> = servers
         .par_iter()
         .map(|&server| {
-            let result = process_server(server, config, dry_run, false);
+            let result = process_server(
+                server,
+                config,
+                dry_run,
+                false,
+                vault_passwords.get(&server.name).map(|s| s.as_str()),
+            );
             bar.inc(1);
             (server, result)
         })
@@ -206,7 +213,10 @@ pub(crate) fn process_servers(
     if fetched > 0 || failed > 0 || skipped_no_cred > 0 {
         log::info!(
             "Done. fetched={} skipped_cert_valid={} skipped_no_cred={} failed={}",
-            fetched, skipped_cert_valid, skipped_no_cred, failed
+            fetched,
+            skipped_cert_valid,
+            skipped_no_cred,
+            failed
         );
     }
 

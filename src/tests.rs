@@ -1,5 +1,5 @@
-use super::config::{load_config, Config, Server};
-use super::kube::{merge_into_main_kubeconfig, process_kubeconfig_file, KubeConfig};
+use super::config::{Config, Server, load_config};
+use super::kube::{KubeConfig, merge_into_main_kubeconfig, process_kubeconfig_file};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -76,6 +76,7 @@ fn test_server_user_fallback() {
         default_file_name: None,
         default_identity_file: None,
         local_output_dir: "".to_string(),
+        bitwarden: None,
         servers: vec![
             Server {
                 name: "server1".to_string(),
@@ -112,6 +113,7 @@ fn test_server_identity_file_fallback() {
         default_file_name: None,
         default_identity_file: Some("default_key".to_string()),
         local_output_dir: "".to_string(),
+        bitwarden: None,
         servers: vec![
             Server {
                 name: "server1".to_string(),
@@ -148,6 +150,7 @@ fn test_server_file_path_fallback() {
         default_file_name: Some("default_name".to_string()),
         default_identity_file: None,
         local_output_dir: "".to_string(),
+        bitwarden: None,
         servers: vec![
             Server {
                 name: "server1".to_string(),
@@ -165,7 +168,7 @@ fn test_server_file_path_fallback() {
                 target_cluster_ip: "".to_string(),
                 user: None,
                 file_path: Some("/server/path".to_string()), // Should use its own
-                file_name: Some("server_name".to_string()), // Should use its own
+                file_name: Some("server_name".to_string()),  // Should use its own
                 context_name: None,
                 identity_file: None,
             },
@@ -232,10 +235,7 @@ fn test_process_kubeconfig_file_updates_content() {
     let updated_kubeconfig: super::kube::KubeConfig = serde_yaml::from_str(&updated_content).unwrap();
 
     // Check cluster server IP
-    assert_eq!(
-        updated_kubeconfig.clusters[0].cluster.server,
-        "https://9.9.9.9:6443"
-    );
+    assert_eq!(updated_kubeconfig.clusters[0].cluster.server, "https://9.9.9.9:6443");
 
     // Check context name and current-context
     assert_eq!(updated_kubeconfig.contexts[0].name, "new-context-name");
@@ -243,10 +243,7 @@ fn test_process_kubeconfig_file_updates_content() {
 
     // Check metadata
     let prefs = updated_kubeconfig.preferences.unwrap();
-    assert_eq!(
-        prefs.get("source-file-sha256").unwrap().as_str().unwrap(),
-        source_hash
-    );
+    assert_eq!(prefs.get("source-file-sha256").unwrap().as_str().unwrap(), source_hash);
     assert!(prefs.contains_key("script-last-updated"));
     assert!(!prefs.contains_key("certificate-expires-at"));
 }
@@ -280,26 +277,11 @@ fn test_process_kubeconfig_file_hash_change_warning() {
     let kubeconfig_path = setup_test_kubeconfig(&temp_dir, TEST_KUBECONFIG_CONTENT);
 
     // First run, should just write the file
-    process_kubeconfig_file(
-        &kubeconfig_path,
-        "9.9.9.9",
-        "first_hash",
-        &None,
-        "test-server",
-        false,
-    )
-    .unwrap();
+    process_kubeconfig_file(&kubeconfig_path, "9.9.9.9", "first_hash", &None, "test-server", false).unwrap();
 
     // Second run with a different hash, should trigger a warning
     // (We can't easily check for logs here, but we're ensuring it runs without panic)
-    let result = process_kubeconfig_file(
-        &kubeconfig_path,
-        "9.9.9.9",
-        "second_hash",
-        &None,
-        "test-server",
-        false,
-    );
+    let result = process_kubeconfig_file(&kubeconfig_path, "9.9.9.9", "second_hash", &None, "test-server", false);
     assert!(result.is_ok());
 }
 
@@ -331,7 +313,10 @@ fn test_process_kubeconfig_no_context_update() {
 #[test]
 fn test_cert_expiry_no_file() {
     let path = std::path::Path::new("/tmp/this_file_does_not_exist_xyz123");
-    assert!(matches!(super::kube::check_local_cert_expiry(path), super::kube::CertStatus::Unknown));
+    assert!(matches!(
+        super::kube::check_local_cert_expiry(path),
+        super::kube::CertStatus::Unknown
+    ));
 }
 
 #[test]
@@ -586,11 +571,7 @@ fn test_merge_replaces_existing() {
     let main_config: KubeConfig = serde_yaml::from_str(&content).unwrap();
 
     // Only one cluster entry for this context name
-    let matching_clusters: Vec<_> = main_config
-        .clusters
-        .iter()
-        .filter(|c| c.name == context_name)
-        .collect();
+    let matching_clusters: Vec<_> = main_config.clusters.iter().filter(|c| c.name == context_name).collect();
     assert_eq!(
         matching_clusters.len(),
         1,
@@ -599,17 +580,12 @@ fn test_merge_replaces_existing() {
         matching_clusters.len()
     );
     assert_eq!(
-        matching_clusters[0].cluster.server,
-        "https://10.99.0.20:6443",
+        matching_clusters[0].cluster.server, "https://10.99.0.20:6443",
         "cluster server was not replaced with the second IP"
     );
 
     // Only one context entry
-    let matching_contexts: Vec<_> = main_config
-        .contexts
-        .iter()
-        .filter(|c| c.name == context_name)
-        .collect();
+    let matching_contexts: Vec<_> = main_config.contexts.iter().filter(|c| c.name == context_name).collect();
     assert_eq!(
         matching_contexts.len(),
         1,
@@ -670,7 +646,11 @@ fn test_merge_dry_run_nonexistent_fetched_returns_ok() {
         "test-server-nonexistent",
         true,
     );
-    assert!(result.is_ok(), "expected Ok for missing fetched file in dry-run, got: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "expected Ok for missing fetched file in dry-run, got: {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -681,7 +661,10 @@ fn test_merge_non_dry_run_returns_err_for_nonexistent_fetched() {
         "test-server-nonexistent",
         false,
     );
-    assert!(result.is_err(), "expected Err for missing fetched file in real run, got Ok");
+    assert!(
+        result.is_err(),
+        "expected Err for missing fetched file in real run, got Ok"
+    );
 }
 
 #[test]
@@ -704,10 +687,7 @@ fn test_merge_dry_run_valid_file_leaves_main_unchanged() {
     // Main config content must be byte-for-byte identical
     if let Some(before) = content_before {
         let after = fs::read_to_string(&main_path).unwrap();
-        assert_eq!(
-            before, after,
-            "~/.kube/config was modified by second dry_run call"
-        );
+        assert_eq!(before, after, "~/.kube/config was modified by second dry_run call");
     }
 }
 
@@ -719,12 +699,9 @@ fn test_merge_dry_run_valid_file_leaves_main_unchanged() {
 /// process_server must return Skipped(CertValid) without opening any SSH connection.
 #[test]
 fn test_process_server_cert_valid_skips_ssh() {
-    use super::fetch::{process_server, ServerResult, SkipReason};
+    use super::fetch::{ServerResult, SkipReason, process_server};
 
-    let temp_dir = Builder::new()
-        .prefix("test_proc_srv_cert_valid")
-        .tempdir()
-        .unwrap();
+    let temp_dir = Builder::new().prefix("test_proc_srv_cert_valid").tempdir().unwrap();
 
     let server_name = "test-proc-cert-valid";
 
@@ -774,10 +751,11 @@ preferences:
         default_file_name: None,
         default_identity_file: None,
         local_output_dir: temp_dir.path().to_string_lossy().into_owned(),
+        bitwarden: None,
         servers: vec![],
     };
 
-    let result = process_server(&server, &cfg, false, false);
+    let result = process_server(&server, &cfg, false, false, None);
     assert!(result.is_ok(), "expected Ok, got Err: {:?}", result.err());
     assert!(
         matches!(result.unwrap(), ServerResult::Skipped(SkipReason::CertValid(_))),
