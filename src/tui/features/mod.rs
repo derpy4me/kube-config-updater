@@ -8,6 +8,7 @@ pub mod keyring_fallback;
 pub mod setup;
 pub mod wizard;
 
+use crate::tui::app::AppState;
 use ratatui::{
     Frame,
     layout::{Constraint, Flex, Layout, Rect},
@@ -16,6 +17,18 @@ use ratatui::{
 };
 
 use crate::state::RunStatus;
+
+// ─── Vault Source Helpers ─────────────────────────────────────────────────────
+
+/// Returns `true` when `server_name` was sourced from the Bitwarden vault.
+/// Falls back to `Local` when the name has no entry (e.g. before vault data loads).
+pub fn is_vault_server(app: &AppState, server_name: &str) -> bool {
+    app.server_sources
+        .get(server_name)
+        .copied()
+        .unwrap_or(crate::bitwarden::ServerSource::Local)
+        == crate::bitwarden::ServerSource::Vault
+}
 
 // ─── Layout Helpers ───────────────────────────────────────────────────────────
 

@@ -30,7 +30,7 @@ pub fn render(frame: &mut ratatui::Frame, app: &AppState) {
     ])
     .split(inner);
 
-    let status_text = if app.in_progress.contains("__bitwarden__") {
+    let status_text = if app.in_progress.contains(crate::tui::app::BITWARDEN_SENTINEL) {
         "Unlocking vault..."
     } else {
         "Enter your Bitwarden master password to unlock the vault."
@@ -82,7 +82,7 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent, tx: &std::sync::mpsc::Sende
             // Spawn vault unlock + fetch on background thread
             let password = app.credential_input.value.clone();
             app.credential_input.clear();
-            app.in_progress.insert("__bitwarden__".to_string());
+            app.in_progress.insert(crate::tui::app::BITWARDEN_SENTINEL.to_string());
 
             let bw_config = app.config.bitwarden.clone();
             let tx = tx.clone();
@@ -119,7 +119,7 @@ fn do_bitwarden_unlock(
 
 /// Called by the event loop when BitwardenComplete arrives.
 pub fn on_complete(app: &mut AppState, result: Result<(Vec<crate::bitwarden::VaultServer>, Vec<String>), String>) {
-    app.in_progress.remove("__bitwarden__");
+    app.in_progress.remove(crate::tui::app::BITWARDEN_SENTINEL);
 
     match result {
         Ok((vault_servers, skipped)) => {

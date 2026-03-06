@@ -111,12 +111,7 @@ fn render_server_table(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
             };
 
             // Source badge — vault servers get a "[vault]" indicator
-            let source = app
-                .server_sources
-                .get(&server.name)
-                .copied()
-                .unwrap_or(crate::bitwarden::ServerSource::Local);
-            let display_name = if source == crate::bitwarden::ServerSource::Vault {
+            let display_name = if super::is_vault_server(app, &server.name) {
                 format!("{} [vault]", server.name)
             } else {
                 server.name.clone()
@@ -281,12 +276,7 @@ pub fn handle_key(
         }
         KeyCode::Char('c') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             if let Some(name) = selected_name {
-                let source = app
-                    .server_sources
-                    .get(&name)
-                    .copied()
-                    .unwrap_or(crate::bitwarden::ServerSource::Local);
-                if source == crate::bitwarden::ServerSource::Vault {
+                if super::is_vault_server(app, &name) {
                     app.notification = Some(("Credentials managed by vault".to_string(), std::time::Instant::now()));
                     return false;
                 }
@@ -303,12 +293,7 @@ pub fn handle_key(
         }
         KeyCode::Char('D') => {
             if let Some(name) = selected_name {
-                let source = app
-                    .server_sources
-                    .get(&name)
-                    .copied()
-                    .unwrap_or(crate::bitwarden::ServerSource::Local);
-                if source == crate::bitwarden::ServerSource::Vault {
+                if super::is_vault_server(app, &name) {
                     app.notification = Some((
                         "Vault servers are managed in Bitwarden".to_string(),
                         std::time::Instant::now(),

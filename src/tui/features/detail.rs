@@ -30,7 +30,7 @@ pub fn render(frame: &mut Frame, app: &mut AppState, server_name: &str) {
     let state = app.server_states.get(server_name).cloned();
     let cert_expires_at = app.cert_cache.get(server_name).and_then(|v| *v);
     let use_color = app.use_color;
-    let config = app.config.clone();
+    let config = &app.config;
 
     // Resolve optional fields with config defaults
     let user = server
@@ -150,16 +150,10 @@ pub fn render(frame: &mut Frame, app: &mut AppState, server_name: &str) {
         ]),
         Line::from(vec![
             Span::styled("  Source:           ", label_style),
-            Span::raw({
-                let source = app
-                    .server_sources
-                    .get(server_name)
-                    .copied()
-                    .unwrap_or(crate::bitwarden::ServerSource::Local);
-                match source {
-                    crate::bitwarden::ServerSource::Local => "Local (config.toml)",
-                    crate::bitwarden::ServerSource::Vault => "Vault (Bitwarden)",
-                }
+            Span::raw(if super::is_vault_server(app, server_name) {
+                "Vault (Bitwarden)"
+            } else {
+                "Local (config.toml)"
             }),
         ]),
         Line::from(Span::raw(format!("  {}", sep))),
@@ -251,13 +245,7 @@ pub fn render(frame: &mut Frame, app: &mut AppState, server_name: &str) {
     let content = Paragraph::new(lines);
     frame.render_widget(content, inner_chunks[0]);
 
-    let is_vault = app
-        .server_sources
-        .get(server_name)
-        .copied()
-        .unwrap_or(crate::bitwarden::ServerSource::Local)
-        == crate::bitwarden::ServerSource::Vault;
-    let footer_text = if is_vault {
+    let footer_text = if super::is_vault_server(app, server_name) {
         "  f:force-fetch  p:probe  Esc:back  ?:help"
     } else {
         "  f:force-fetch  p:probe  c:cred  e:edit config  Esc:back  ?:help"
@@ -267,12 +255,7 @@ pub fn render(frame: &mut Frame, app: &mut AppState, server_name: &str) {
 }
 
 pub fn handle_key(app: &mut AppState, name: String, key: KeyEvent, tx: &mpsc::Sender<AppEvent>) -> bool {
-    let is_vault = app
-        .server_sources
-        .get(&name)
-        .copied()
-        .unwrap_or(crate::bitwarden::ServerSource::Local)
-        == crate::bitwarden::ServerSource::Vault;
+    let is_vault = super::is_vault_server(app, &name);
 
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {

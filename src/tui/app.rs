@@ -12,6 +12,9 @@ use crate::state::ServerRunState;
 /// Kept as a constant to avoid the same magic string appearing across multiple files.
 pub const WIZARD_SENTINEL: &str = "__wizard__";
 
+/// Sentinel used in `in_progress` while a Bitwarden vault unlock is running.
+pub const BITWARDEN_SENTINEL: &str = "__bitwarden__";
+
 pub enum AppEvent {
     Key(KeyEvent),
     Resize(u16, u16),
