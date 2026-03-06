@@ -11,7 +11,7 @@ use ratatui::{
 
 use super::{cert_color, cert_expires_display, status_color, status_display};
 use crate::credentials::CredentialResult;
-use crate::tui::app::{AppEvent, AppState, ProbeState, View};
+use crate::tui::app::{AppEvent, AppState, EditServerState, ProbeState, View};
 
 pub fn render(frame: &mut Frame, app: &mut AppState, server_name: &str) {
     let area = frame.area();
@@ -266,13 +266,7 @@ pub fn render(frame: &mut Frame, app: &mut AppState, server_name: &str) {
     frame.render_widget(footer, inner_chunks[1]);
 }
 
-pub fn handle_key(
-    app: &mut AppState,
-    name: String,
-    key: KeyEvent,
-    tx: &mpsc::Sender<AppEvent>,
-    terminal: &mut ratatui::DefaultTerminal,
-) -> bool {
+pub fn handle_key(app: &mut AppState, name: String, key: KeyEvent, tx: &mpsc::Sender<AppEvent>) -> bool {
     let is_vault = app
         .server_sources
         .get(&name)
@@ -318,7 +312,9 @@ pub fn handle_key(
                 ));
                 return false;
             }
-            super::dashboard::open_editor(terminal, app);
+            if let Some(server) = app.config.servers.iter().find(|s| s.name == name).cloned() {
+                app.view = View::EditServer(EditServerState::from_server(&server));
+            }
         }
         KeyCode::Char('?') => {
             app.prior_view = Some(Box::new(View::Detail(name)));

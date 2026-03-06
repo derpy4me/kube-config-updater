@@ -169,6 +169,53 @@ pub fn add_server(config_path: &PathBuf, server: &Server) -> Result<(), anyhow::
     Ok(())
 }
 
+/// Update an existing [[server]] entry in config.toml by name.
+/// Fields set to Some("") are written as absent (removing optional fields).
+pub fn update_server(config_path: &PathBuf, updated: &Server) -> Result<(), anyhow::Error> {
+    let content = std::fs::read_to_string(config_path)?;
+    let mut doc: DocumentMut = content
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Failed to parse config.toml: {}", e))?;
+
+    let servers = doc["server"]
+        .as_array_of_tables_mut()
+        .ok_or_else(|| anyhow::anyhow!("No [[server]] entries found"))?;
+
+    let entry = servers
+        .iter_mut()
+        .find(|t| t["name"].as_str() == Some(&updated.name))
+        .ok_or_else(|| anyhow::anyhow!("Server '{}' not found in config", updated.name))?;
+
+    entry["address"] = value(updated.address.as_str());
+    entry["target_cluster_ip"] = value(updated.target_cluster_ip.as_str());
+
+    set_or_remove(entry, "user", updated.user.as_deref());
+    set_or_remove(entry, "file_path", updated.file_path.as_deref());
+    set_or_remove(entry, "file_name", updated.file_name.as_deref());
+    set_or_remove(entry, "context_name", updated.context_name.as_deref());
+    set_or_remove(entry, "identity_file", updated.identity_file.as_deref());
+
+    let tmp = config_path.with_extension("toml.tmp");
+    std::fs::write(&tmp, doc.to_string()).map_err(|e| {
+        anyhow::anyhow!(
+            "Couldn't save config.toml — check file permissions at {}: {}",
+            config_path.display(),
+            e
+        )
+    })?;
+    std::fs::rename(&tmp, config_path)?;
+    Ok(())
+}
+
+fn set_or_remove(entry: &mut toml_edit::Table, key: &str, val: Option<&str>) {
+    match val {
+        Some(v) if !v.is_empty() => entry[key] = value(v),
+        _ => {
+            entry.remove(key);
+        }
+    }
+}
+
 /// Remove all [[server]] entries with the given name from config.toml.
 pub fn remove_server(config_path: &PathBuf, name: &str) -> Result<(), anyhow::Error> {
     let content = std::fs::read_to_string(config_path)?;

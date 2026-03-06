@@ -67,6 +67,64 @@ pub enum View {
     BitwardenUnlock {
         error: Option<String>,
     },
+    EditServer(EditServerState),
+}
+
+// ─── Edit Server ──────────────────────────────────────────────────────────────
+
+/// In-TUI field editor for a local server. Pre-populated from the current config.
+#[derive(Clone, Debug)]
+pub struct EditServerState {
+    /// Name of the server being edited (not editable — used as the key).
+    pub server_name: String,
+    /// Index of the currently focused field (0-6).
+    pub field_idx: usize,
+    /// Editable field values: [address, target_cluster_ip, user, file_path, file_name, context_name, identity_file]
+    pub fields: [String; 7],
+    pub error: Option<String>,
+}
+
+impl EditServerState {
+    pub const LABELS: [&'static str; 7] = [
+        "Address",
+        "Cluster IP",
+        "SSH user",
+        "Remote path",
+        "Remote filename",
+        "Context name",
+        "Identity file",
+    ];
+
+    pub fn from_server(server: &crate::config::Server) -> Self {
+        EditServerState {
+            server_name: server.name.clone(),
+            field_idx: 0,
+            fields: [
+                server.address.clone(),
+                server.target_cluster_ip.clone(),
+                server.user.clone().unwrap_or_default(),
+                server.file_path.clone().unwrap_or_default(),
+                server.file_name.clone().unwrap_or_default(),
+                server.context_name.clone().unwrap_or_default(),
+                server.identity_file.clone().unwrap_or_default(),
+            ],
+            error: None,
+        }
+    }
+
+    pub fn to_server(&self) -> crate::config::Server {
+        let opt = |s: &str| if s.is_empty() { None } else { Some(s.to_string()) };
+        crate::config::Server {
+            name: self.server_name.clone(),
+            address: self.fields[0].clone(),
+            target_cluster_ip: self.fields[1].clone(),
+            user: opt(&self.fields[2]),
+            file_path: opt(&self.fields[3]),
+            file_name: opt(&self.fields[4]),
+            context_name: opt(&self.fields[5]),
+            identity_file: opt(&self.fields[6]),
+        }
+    }
 }
 
 // ─── Setup Wizard ─────────────────────────────────────────────────────────────

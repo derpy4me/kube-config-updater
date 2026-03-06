@@ -346,6 +346,7 @@ fn render_app(frame: &mut ratatui::Frame, app: &mut AppState) {
     enum ViewKind {
         Dashboard,
         Detail(String),
+        EditServer,
         Wizard,
         SetupWizard,
         Help,
@@ -360,6 +361,7 @@ fn render_app(frame: &mut ratatui::Frame, app: &mut AppState) {
     let kind = match &app.view {
         View::Dashboard => ViewKind::Dashboard,
         View::Detail(name) => ViewKind::Detail(name.clone()),
+        View::EditServer(_) => ViewKind::EditServer,
         View::Wizard(_) => ViewKind::Wizard,
         View::SetupWizard(_) => ViewKind::SetupWizard,
         View::Help => ViewKind::Help,
@@ -378,6 +380,15 @@ fn render_app(frame: &mut ratatui::Frame, app: &mut AppState) {
     match kind {
         ViewKind::Dashboard => features::dashboard::render(frame, app),
         ViewKind::Detail(name) => features::detail::render(frame, app, &name),
+        ViewKind::EditServer => {
+            let state = match &app.view {
+                View::EditServer(s) => s.clone(),
+                _ => unreachable!(),
+            };
+            features::detail::render(frame, app, &state.server_name);
+            features::render_dim_background(frame, frame.area());
+            features::edit_server::render(frame, app, &state);
+        }
         ViewKind::Wizard => {
             let ws = match &app.view {
                 View::Wizard(ws) => ws.clone(),
@@ -439,7 +450,8 @@ fn handle_key(
 
     match &app.view {
         View::Dashboard => features::dashboard::handle_key(app, key, tx, terminal),
-        View::Detail(name) => features::detail::handle_key(app, name.clone(), key, tx, terminal),
+        View::Detail(name) => features::detail::handle_key(app, name.clone(), key, tx),
+        View::EditServer(_) => features::edit_server::handle_key(app, key),
         View::DeleteConfirm(name) => features::dashboard::handle_key_delete_confirm(app, name.clone(), key),
         View::Help => {
             features::help::handle_key(app, key);

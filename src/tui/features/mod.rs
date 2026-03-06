@@ -2,6 +2,7 @@ pub mod bitwarden;
 pub mod credentials;
 pub mod dashboard;
 pub mod detail;
+pub mod edit_server;
 pub mod help;
 pub mod keyring_fallback;
 pub mod setup;
