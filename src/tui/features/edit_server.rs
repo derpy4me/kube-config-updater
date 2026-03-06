@@ -77,7 +77,7 @@ pub fn render(frame: &mut Frame, app: &AppState, state: &EditServerState) {
     }
 
     frame.render_widget(
-        Paragraph::new("  Ctrl+S:save  Esc:cancel").style(Style::default().add_modifier(Modifier::DIM)),
+        Paragraph::new("  Enter:save  Esc:cancel").style(Style::default().add_modifier(Modifier::DIM)),
         rows[5],
     );
 }
@@ -108,7 +108,7 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> bool {
             state.error = None;
             app.view = View::EditServer(state);
         }
-        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Enter => {
             save(app, state);
         }
         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {

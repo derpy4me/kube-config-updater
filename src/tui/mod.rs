@@ -140,7 +140,8 @@ fn run_app(mut app: AppState) -> anyhow::Result<()> {
 
     let tx_watcher = tx.clone();
     std::thread::spawn(move || {
-        let path = std::path::Path::new(state::STATE_FILE);
+        let state_path = state::state_file_path();
+        let path = state_path.as_path();
         let mut last_mtime: Option<std::time::SystemTime> = None;
         loop {
             std::thread::sleep(Duration::from_secs(2));
