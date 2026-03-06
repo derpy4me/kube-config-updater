@@ -2,16 +2,15 @@ use std::sync::mpsc;
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
+    Frame,
     layout::{Alignment, Constraint, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Paragraph},
-    Frame,
 };
 
-use crate::credentials::CredentialResult;
-use crate::tui::app::{AppEvent, AppState, ProbeState, View};
 use super::{cert_color, cert_expires_display, status_color, status_display};
+use crate::tui::app::{AppEvent, AppState, EditServerState, ProbeState, View};
 
 pub fn render(frame: &mut Frame, app: &mut AppState, server_name: &str) {
     let area = frame.area();
@@ -22,10 +21,7 @@ pub fn render(frame: &mut Frame, app: &mut AppState, server_name: &str) {
         Some(s) => s,
         None => {
             let msg = format!("Server not found: {}", server_name);
-            frame.render_widget(
-                Paragraph::new(msg).alignment(Alignment::Center),
-                area,
-            );
+            frame.render_widget(Paragraph::new(msg).alignment(Alignment::Center), area);
             return;
         }
     };
@@ -33,7 +29,7 @@ pub fn render(frame: &mut Frame, app: &mut AppState, server_name: &str) {
     let state = app.server_states.get(server_name).cloned();
     let cert_expires_at = app.cert_cache.get(server_name).and_then(|v| *v);
     let use_color = app.use_color;
-    let config = app.config.clone();
+    let config = &app.config;
 
     // Resolve optional fields with config defaults
     let user = server
@@ -57,16 +53,10 @@ pub fn render(frame: &mut Frame, app: &mut AppState, server_name: &str) {
         .unwrap_or("—")
         .to_string();
 
-    let context_name = server
-        .context_name
-        .as_deref()
-        .unwrap_or("—")
-        .to_string();
+    let context_name = server.context_name.as_deref().unwrap_or("—").to_string();
 
-    // Credential status
-    let binding = [server_name];
-    let cred_results = crate::credentials::check_credentials(&binding);
-    let cred_stored = matches!(cred_results.first(), Some((_, CredentialResult::Found(_))));
+    // Credential status — read from cache populated at startup and after credential changes
+    let cred_stored = app.cred_cache.get(server_name).copied().unwrap_or(false);
     let cred_text = if cred_stored { "Stored" } else { "Not stored" };
     let cred_style = if !cred_stored && use_color {
         Style::default().fg(Color::Yellow)
@@ -116,9 +106,11 @@ pub fn render(frame: &mut Frame, app: &mut AppState, server_name: &str) {
     };
 
     // Probe result for this server (if any)
-    let probe_state = app.probe.as_ref().and_then(|(name, state)| {
-        if name == server_name { Some(state.clone()) } else { None }
-    });
+    let probe_state = app.probe.as_ref().and_then(
+        |(name, state)| {
+            if name == server_name { Some(state.clone()) } else { None }
+        },
+    );
     let spinner_char = app.spinner.current();
 
     // Separator line (fills available width, capped at content width)
@@ -136,10 +128,7 @@ pub fn render(frame: &mut Frame, app: &mut AppState, server_name: &str) {
             Span::styled("  Address:          ", label_style),
             Span::raw(server.address.clone()),
         ]),
-        Line::from(vec![
-            Span::styled("  SSH User:         ", label_style),
-            Span::raw(user),
-        ]),
+        Line::from(vec![Span::styled("  SSH User:         ", label_style), Span::raw(user)]),
         Line::from(vec![
             Span::styled("  Remote path:      ", label_style),
             Span::raw(file_path),
@@ -155,6 +144,14 @@ pub fn render(frame: &mut Frame, app: &mut AppState, server_name: &str) {
         Line::from(vec![
             Span::styled("  Context name:     ", label_style),
             Span::raw(context_name),
+        ]),
+        Line::from(vec![
+            Span::styled("  Source:           ", label_style),
+            Span::raw(if super::is_vault_server(app, server_name) {
+                "Vault (Bitwarden)"
+            } else {
+                "Local (config.toml)"
+            }),
         ]),
         Line::from(Span::raw(format!("  {}", sep))),
         Line::from(vec![
@@ -234,35 +231,29 @@ pub fn render(frame: &mut Frame, app: &mut AppState, server_name: &str) {
 
     // Outer layout: border block | content | footer
     let title = format!(" Server Detail: {} ", server_name);
-    let outer_block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .title(title);
+    let outer_block = Block::bordered().border_type(BorderType::Rounded).title(title);
 
     let inner_area = outer_block.inner(area);
     frame.render_widget(outer_block, area);
 
     // Split inner area: content (fill) | footer (1 row)
-    let inner_chunks = Layout::vertical([
-        Constraint::Fill(1),
-        Constraint::Length(1),
-    ])
-    .split(inner_area);
+    let inner_chunks = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).split(inner_area);
 
     let content = Paragraph::new(lines);
     frame.render_widget(content, inner_chunks[0]);
 
-    let footer = Paragraph::new(Line::from(vec![
-        Span::raw("  f:force-fetch  p:probe  c:cred  Esc:back  ?:help"),
-    ]));
+    let footer_text = if super::is_vault_server(app, server_name) {
+        "  f:force-fetch  p:probe  Esc:back  ?:help"
+    } else {
+        "  f:force-fetch  p:probe  c:cred  e:edit config  Esc:back  ?:help"
+    };
+    let footer = Paragraph::new(Line::from(vec![Span::raw(footer_text)]));
     frame.render_widget(footer, inner_chunks[1]);
 }
 
-pub fn handle_key(
-    app: &mut AppState,
-    name: String,
-    key: KeyEvent,
-    tx: &mpsc::Sender<AppEvent>,
-) -> bool {
+pub fn handle_key(app: &mut AppState, name: String, key: KeyEvent, tx: &mpsc::Sender<AppEvent>) -> bool {
+    let is_vault = super::is_vault_server(app, &name);
+
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
             app.probe = None;
@@ -276,18 +267,34 @@ pub fn handle_key(
             }
         }
         KeyCode::Char('p') => {
-            let already_probing = app.probe.as_ref()
+            let already_probing = app
+                .probe
+                .as_ref()
                 .map(|(n, s)| n == &name && matches!(s, ProbeState::Probing))
                 .unwrap_or(false);
-            if !already_probing
-                && let Some(server) = app.config.servers.iter().find(|s| s.name == name).cloned()
-            {
+            if !already_probing && let Some(server) = app.config.servers.iter().find(|s| s.name == name).cloned() {
                 app.probe = Some((name.clone(), ProbeState::Probing));
                 spawn_probe(server, app.config.clone(), tx.clone());
             }
         }
         KeyCode::Char('c') => {
+            if is_vault {
+                app.notification = Some(("Credentials managed by vault".to_string(), std::time::Instant::now()));
+                return false;
+            }
             app.view = View::CredentialMenu(name);
+        }
+        KeyCode::Char('e') => {
+            if is_vault {
+                app.notification = Some((
+                    "Vault servers are managed in Bitwarden".to_string(),
+                    std::time::Instant::now(),
+                ));
+                return false;
+            }
+            if let Some(server) = app.config.servers.iter().find(|s| s.name == name).cloned() {
+                app.view = View::EditServer(EditServerState::from_server(&server));
+            }
         }
         KeyCode::Char('?') => {
             app.prior_view = Some(Box::new(View::Detail(name)));
@@ -298,11 +305,7 @@ pub fn handle_key(
     false
 }
 
-fn spawn_probe(
-    server: crate::config::Server,
-    config: crate::config::Config,
-    tx: mpsc::Sender<AppEvent>,
-) {
+fn spawn_probe(server: crate::config::Server, config: crate::config::Config, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || {
         let result = do_probe(&server, &config).map_err(|e| crate::tui::friendly_error(&e));
         tx.send(AppEvent::ProbeComplete {

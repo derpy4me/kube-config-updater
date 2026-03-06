@@ -2,15 +2,15 @@ use std::sync::mpsc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
+    Frame,
     layout::{Constraint, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
-    Frame,
 };
 
-use crate::tui::app::{AppEvent, AppState, AuthMethod, View, WizardState, WizardStep, WIZARD_SENTINEL};
 use super::{centered_rect, render_dim_background};
+use crate::tui::app::{AppEvent, AppState, AuthMethod, View, WIZARD_SENTINEL, WizardState, WizardStep};
 
 pub fn render(frame: &mut Frame, app: &mut AppState, wizard: &WizardState) {
     let area = frame.area();
@@ -87,11 +87,7 @@ fn render_step_indicator(frame: &mut Frame, wizard: &WizardState, area: ratatui:
 
     let dots_len = dots.chars().count() as u16;
 
-    let cols = Layout::horizontal([
-        Constraint::Fill(1),
-        Constraint::Length(dots_len),
-    ])
-    .split(area);
+    let cols = Layout::horizontal([Constraint::Fill(1), Constraint::Length(dots_len)]).split(area);
 
     let left = Paragraph::new(label);
     frame.render_widget(left, cols[0]);
@@ -103,7 +99,11 @@ fn render_step_indicator(frame: &mut Frame, wizard: &WizardState, area: ratatui:
 fn render_text_input_content(frame: &mut Frame, wizard: &WizardState, area: ratatui::layout::Rect) {
     let (field_label, value, hint) = match &wizard.step {
         WizardStep::Name => ("Server name", wizard.name.as_str(), "Unique identifier (no spaces)"),
-        WizardStep::Address => ("SSH host/IP", wizard.address.as_str(), "e.g. 192.168.1.10 or myserver.local"),
+        WizardStep::Address => (
+            "SSH host/IP",
+            wizard.address.as_str(),
+            "e.g. 192.168.1.10 or myserver.local",
+        ),
         WizardStep::User => ("SSH user", wizard.user.as_str(), "Leave blank to use config default"),
         WizardStep::FilePath => (
             "Remote file path",
@@ -146,12 +146,7 @@ fn render_text_input_content(frame: &mut Frame, wizard: &WizardState, area: rata
     frame.render_widget(hint_line, content_rows[3]);
 }
 
-fn render_auth_content(
-    frame: &mut Frame,
-    app: &AppState,
-    wizard: &WizardState,
-    area: ratatui::layout::Rect,
-) {
+fn render_auth_content(frame: &mut Frame, app: &AppState, wizard: &WizardState, area: ratatui::layout::Rect) {
     let rows = Layout::vertical([
         Constraint::Length(1), // "Authentication method:"
         Constraint::Length(1), // [P] Password  [I] Identity file
@@ -218,8 +213,7 @@ fn render_auth_content(
             } else {
                 Style::default()
             };
-            let input_line = Paragraph::new(format!("  > {}│", wizard.identity_file_input))
-                .style(input_style);
+            let input_line = Paragraph::new(format!("  > {}│", wizard.identity_file_input)).style(input_style);
             frame.render_widget(input_line, rows[4]);
         }
     }
@@ -248,12 +242,7 @@ fn render_auth_content(
     frame.render_widget(test_line, rows[5]);
 }
 
-fn render_error_area(
-    frame: &mut Frame,
-    app: &AppState,
-    wizard: &WizardState,
-    area: ratatui::layout::Rect,
-) {
+fn render_error_area(frame: &mut Frame, app: &AppState, wizard: &WizardState, area: ratatui::layout::Rect) {
     if let Some(ref err_msg) = wizard.error {
         let style = if app.use_color {
             Style::default().fg(Color::Red)
@@ -261,7 +250,9 @@ fn render_error_area(
             Style::default()
         };
         frame.render_widget(
-            Paragraph::new(format!("  {}", err_msg)).style(style).wrap(Wrap { trim: true }),
+            Paragraph::new(format!("  {}", err_msg))
+                .style(style)
+                .wrap(Wrap { trim: true }),
             area,
         );
     }
@@ -281,11 +272,7 @@ fn render_footer(frame: &mut Frame, wizard: &WizardState, area: ratatui::layout:
     frame.render_widget(footer, area);
 }
 
-pub fn handle_key(
-    app: &mut AppState,
-    key: KeyEvent,
-    tx: &mpsc::Sender<AppEvent>,
-) -> bool {
+pub fn handle_key(app: &mut AppState, key: KeyEvent, tx: &mpsc::Sender<AppEvent>) -> bool {
     let ws = match &app.view {
         View::Wizard(ws) => ws.clone(),
         _ => return false,
@@ -335,15 +322,23 @@ pub fn handle_key(
                 }
                 KeyCode::Backspace => {
                     match ws.auth_method {
-                        AuthMethod::Password => { ws.password_input.pop(); }
-                        AuthMethod::IdentityFile => { ws.identity_file_input.pop(); }
+                        AuthMethod::Password => {
+                            ws.password_input.pop();
+                        }
+                        AuthMethod::IdentityFile => {
+                            ws.identity_file_input.pop();
+                        }
                     }
                     app.view = View::Wizard(ws);
                 }
                 KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                     match ws.auth_method {
-                        AuthMethod::Password => { ws.password_input.push(c); }
-                        AuthMethod::IdentityFile => { ws.identity_file_input.push(c); }
+                        AuthMethod::Password => {
+                            ws.password_input.push(c);
+                        }
+                        AuthMethod::IdentityFile => {
+                            ws.identity_file_input.push(c);
+                        }
                     }
                     app.view = View::Wizard(ws);
                 }
@@ -392,12 +387,19 @@ pub fn handle_key(
         }
     } else {
         match key.code {
-            KeyCode::Char('q') => { app.view = View::Dashboard; }
+            KeyCode::Char('q') => {
+                app.view = View::Dashboard;
+            }
             KeyCode::Esc => {
                 let mut ws = ws;
                 match ws.step.prev() {
-                    Some(prev) => { ws.step = prev; app.view = View::Wizard(ws); }
-                    None => { app.view = View::Dashboard; } // cancel at Name step
+                    Some(prev) => {
+                        ws.step = prev;
+                        app.view = View::Wizard(ws);
+                    }
+                    None => {
+                        app.view = View::Dashboard;
+                    } // cancel at Name step
                 }
             }
             KeyCode::Enter => {
@@ -452,16 +454,21 @@ pub fn on_test_complete(app: &mut AppState, result: Result<(), String>) {
     if let View::Wizard(ws) = &mut app.view {
         ws.testing = false;
         match result {
-            Ok(()) => { ws.test_passed = true; ws.error = None; }
-            Err(msg) => { ws.test_passed = false; ws.error = Some(msg); }
+            Ok(()) => {
+                ws.test_passed = true;
+                ws.error = None;
+            }
+            Err(msg) => {
+                ws.test_passed = false;
+                ws.error = Some(msg);
+            }
         }
     }
 }
 
 fn spawn_wizard_test(ws: WizardState, default_user: Option<String>, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || {
-        let result = do_wizard_connection_test(&ws, default_user)
-            .map_err(|e| crate::tui::friendly_error(&e));
+        let result = do_wizard_connection_test(&ws, default_user).map_err(|e| crate::tui::friendly_error(&e));
         tx.send(AppEvent::WizardTestComplete { result }).ok();
     });
 }
@@ -505,10 +512,26 @@ fn wizard_save(app: &mut AppState, ws: &WizardState) {
         name: ws.name.clone(),
         address: ws.address.clone(),
         target_cluster_ip: ws.target_cluster_ip.clone(),
-        user: if ws.user.is_empty() { None } else { Some(ws.user.clone()) },
-        file_path: if ws.file_path.is_empty() { None } else { Some(ws.file_path.clone()) },
-        file_name: if ws.file_name.is_empty() { None } else { Some(ws.file_name.clone()) },
-        context_name: if ws.context_name.is_empty() { None } else { Some(ws.context_name.clone()) },
+        user: if ws.user.is_empty() {
+            None
+        } else {
+            Some(ws.user.clone())
+        },
+        file_path: if ws.file_path.is_empty() {
+            None
+        } else {
+            Some(ws.file_path.clone())
+        },
+        file_name: if ws.file_name.is_empty() {
+            None
+        } else {
+            Some(ws.file_name.clone())
+        },
+        context_name: if ws.context_name.is_empty() {
+            None
+        } else {
+            Some(ws.context_name.clone())
+        },
         identity_file: if ws.auth_method == AuthMethod::IdentityFile && !ws.identity_file_input.is_empty() {
             Some(ws.identity_file_input.clone())
         } else {
@@ -521,31 +544,32 @@ fn wizard_save(app: &mut AppState, ws: &WizardState) {
         };
         return;
     }
-    if ws.auth_method == AuthMethod::Password && !ws.password_input.value.is_empty() {
-        if let Err(e) = crate::credentials::set_credential(&ws.name, &ws.password_input.value) {
-            // Server was already written to disk; reload config so it appears in the dashboard.
-            let path_str = app.config_path.to_string_lossy().to_string();
-            if let Ok(new_config) = crate::config::load_config(&path_str) {
-                app.config = new_config;
-            }
-            if crate::credentials::keyring_error_is_unavailable(&e) {
-                // Offer the file-based fallback; user must explicitly accept before anything is written.
-                app.view = View::KeyringFallbackConsent {
-                    server_name: ws.name.clone(),
-                    password: ws.password_input.value.clone(),
-                    keyring_error: e,
-                };
-            } else {
-                app.view = View::Error {
-                    message: format!(
-                        "Server '{}' was saved but the password could not be stored in the keyring: {}. \
-                         Set it from the dashboard with 'c'.",
-                        ws.name, e
-                    ),
-                        };
-            }
-            return;
+    if ws.auth_method == AuthMethod::Password
+        && !ws.password_input.value.is_empty()
+        && let Err(e) = crate::credentials::set_credential(&ws.name, &ws.password_input.value)
+    {
+        // Server was already written to disk; reload config so it appears in the dashboard.
+        let path_str = app.config_path.to_string_lossy().to_string();
+        if let Ok(new_config) = crate::config::load_config(&path_str) {
+            app.config = new_config;
         }
+        if crate::credentials::keyring_error_is_unavailable(&e) {
+            // Offer the file-based fallback; user must explicitly accept before anything is written.
+            app.view = View::KeyringFallbackConsent {
+                server_name: ws.name.clone(),
+                password: ws.password_input.value.clone(),
+                keyring_error: e,
+            };
+        } else {
+            app.view = View::Error {
+                message: format!(
+                    "Server '{}' was saved but the password could not be stored in the keyring: {}. \
+                         Set it from the dashboard with 'c'.",
+                    ws.name, e
+                ),
+            };
+        }
+        return;
     }
     let _ = crate::state::update_server_state(
         &ws.name,
@@ -557,36 +581,38 @@ fn wizard_save(app: &mut AppState, ws: &WizardState) {
     );
     let path_str = app.config_path.to_string_lossy().to_string();
     match crate::config::load_config(&path_str) {
-        Ok(new_config) => { app.config = new_config; }
+        Ok(new_config) => {
+            app.config = new_config;
+        }
         Err(e) => {
             app.view = View::Error {
                 message: format!("Server saved but config reload failed: {}", e),
-                };
+            };
             return;
         }
     }
-    app.notification = Some((
-        format!("Server '{}' added", ws.name),
-        std::time::Instant::now(),
-    ));
+    app.notification = Some((format!("Server '{}' added", ws.name), std::time::Instant::now()));
     app.view = View::Dashboard;
 }
 
-fn wizard_validate_current(
-    ws: &WizardState,
-    config: &crate::config::Config,
-) -> Option<String> {
+fn wizard_validate_current(ws: &WizardState, config: &crate::config::Config) -> Option<String> {
     match &ws.step {
         WizardStep::Name => {
-            if ws.name.is_empty() { return Some("Name cannot be empty".to_string()); }
-            if ws.name.contains(' ') { return Some("Name cannot contain spaces".to_string()); }
+            if ws.name.is_empty() {
+                return Some("Name cannot be empty".to_string());
+            }
+            if ws.name.contains(' ') {
+                return Some("Name cannot contain spaces".to_string());
+            }
             if config.servers.iter().any(|s| s.name == ws.name) {
                 return Some(format!("A server named '{}' already exists", ws.name));
             }
             None
         }
         WizardStep::Address => {
-            if ws.address.is_empty() { return Some("Address cannot be empty".to_string()); }
+            if ws.address.is_empty() {
+                return Some("Address cannot be empty".to_string());
+            }
             None
         }
         WizardStep::TargetClusterIp => {
@@ -632,8 +658,7 @@ fn render_help_popup(frame: &mut Frame, wizard: &WizardState) {
     let lines = step_help_lines(&wizard.step);
     frame.render_widget(Paragraph::new(lines), rows[0]);
 
-    let close_hint = Paragraph::new("  ? or Esc to close")
-        .style(Style::default().add_modifier(Modifier::DIM));
+    let close_hint = Paragraph::new("  ? or Esc to close").style(Style::default().add_modifier(Modifier::DIM));
     frame.render_widget(close_hint, rows[1]);
 }
 

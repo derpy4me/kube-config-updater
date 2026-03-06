@@ -2,7 +2,7 @@
 use keyring::{Entry, Error as KeyringError};
 
 #[cfg(not(target_os = "macos"))]
-use base64::{engine::general_purpose, Engine as _};
+use base64::{Engine as _, engine::general_purpose};
 
 #[cfg(not(target_os = "macos"))]
 use std::collections::HashMap;
@@ -81,9 +81,12 @@ mod macos_keychain {
             .args([
                 "add-generic-password",
                 "-U", // update existing entry if present
-                "-s", service,
-                "-a", account,
-                "-w", password,
+                "-s",
+                service,
+                "-a",
+                account,
+                "-w",
+                password,
             ])
             .status()
             .map_err(|e| format!("security command failed: {}", e))?;
@@ -105,10 +108,7 @@ mod macos_keychain {
             // exit 44 = item not found; treat as success (idempotent)
             Ok(())
         } else {
-            Err(format!(
-                "security delete-generic-password exited with {}",
-                status
-            ))
+            Err(format!("security delete-generic-password exited with {}", status))
         }
     }
 }
@@ -175,11 +175,7 @@ pub struct FileKeyring {
 impl FileKeyring {
     pub fn default_path() -> std::path::PathBuf {
         dirs::config_dir()
-            .unwrap_or_else(|| {
-                dirs::home_dir()
-                    .unwrap_or_default()
-                    .join(".config")
-            })
+            .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"))
             .join("kube_config_updater")
             .join("credentials")
     }
@@ -194,12 +190,11 @@ impl FileKeyring {
             if line.starts_with('#') || line.trim().is_empty() {
                 continue;
             }
-            if let Some((account, b64)) = line.split_once('\t') {
-                if let Ok(pw_bytes) = general_purpose::STANDARD.decode(b64.trim()) {
-                    if let Ok(pw) = String::from_utf8(pw_bytes) {
-                        map.insert(account.to_string(), pw);
-                    }
-                }
+            if let Some((account, b64)) = line.split_once('\t')
+                && let Ok(pw_bytes) = general_purpose::STANDARD.decode(b64.trim())
+                && let Ok(pw) = String::from_utf8(pw_bytes)
+            {
+                map.insert(account.to_string(), pw);
             }
         }
         map
@@ -209,8 +204,7 @@ impl FileKeyring {
         use std::io::Write;
 
         let parent = self.path.parent().ok_or("invalid credentials path")?;
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("could not create credentials directory: {}", e))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("could not create credentials directory: {}", e))?;
 
         // Restrict directory to owner-only before writing
         #[cfg(unix)]
@@ -250,8 +244,7 @@ impl FileKeyring {
             .map_err(|e| format!("could not write credentials: {}", e))?;
         drop(file);
 
-        std::fs::rename(&tmp, &self.path)
-            .map_err(|e| format!("could not finalize credentials file: {}", e))?;
+        std::fs::rename(&tmp, &self.path).map_err(|e| format!("could not finalize credentials file: {}", e))?;
 
         Ok(())
     }
@@ -295,10 +288,12 @@ pub fn get_credential(server_name: &str) -> CredentialResult {
     {
         let primary = get_credential_with(server_name, &RealKeyring);
         if matches!(primary, CredentialResult::Unavailable(_)) {
-            let file = FileKeyring { path: FileKeyring::default_path() };
+            let file = FileKeyring {
+                path: FileKeyring::default_path(),
+            };
             return get_credential_with(server_name, &file);
         }
-        return primary;
+        primary
     }
     #[cfg(target_os = "macos")]
     get_credential_with(server_name, &RealKeyring)
@@ -322,11 +317,7 @@ pub fn set_credential(server_name: &str, password: &str) -> Result<(), String> {
     set_credential_with(server_name, password, &RealKeyring)
 }
 
-pub fn set_credential_with(
-    server_name: &str,
-    password: &str,
-    backend: &dyn KeyringBackend,
-) -> Result<(), String> {
+pub fn set_credential_with(server_name: &str, password: &str, backend: &dyn KeyringBackend) -> Result<(), String> {
     backend.set(SERVICE, server_name, password)
 }
 
@@ -340,8 +331,10 @@ pub fn set_credential_with(
 pub fn set_credential_file(server_name: &str, password: &str) -> Result<(), String> {
     #[cfg(not(target_os = "macos"))]
     {
-        let file = FileKeyring { path: FileKeyring::default_path() };
-        return set_credential_with(server_name, password, &file);
+        let file = FileKeyring {
+            path: FileKeyring::default_path(),
+        };
+        set_credential_with(server_name, password, &file)
     }
     #[cfg(target_os = "macos")]
     set_credential_with(server_name, password, &RealKeyring)
@@ -356,17 +349,16 @@ pub fn delete_credential(server_name: &str) -> Result<(), String> {
         // Try keyring first (may not be available — ignore that specific error)
         let _ = delete_credential_with(server_name, &RealKeyring);
         // Always also attempt to remove from file store (idempotent)
-        let file = FileKeyring { path: FileKeyring::default_path() };
-        return delete_credential_with(server_name, &file);
+        let file = FileKeyring {
+            path: FileKeyring::default_path(),
+        };
+        delete_credential_with(server_name, &file)
     }
     #[cfg(target_os = "macos")]
     delete_credential_with(server_name, &RealKeyring)
 }
 
-pub fn delete_credential_with(
-    server_name: &str,
-    backend: &dyn KeyringBackend,
-) -> Result<(), String> {
+pub fn delete_credential_with(server_name: &str, backend: &dyn KeyringBackend) -> Result<(), String> {
     backend.delete(SERVICE, server_name)
 }
 
@@ -444,10 +436,7 @@ mod tests {
 
         fn set(&self, service: &str, account: &str, password: &str) -> Result<(), String> {
             let mut store = self.store.lock().unwrap();
-            store.insert(
-                (service.to_string(), account.to_string()),
-                password.to_string(),
-            );
+            store.insert((service.to_string(), account.to_string()), password.to_string());
             Ok(())
         }
 
@@ -485,15 +474,9 @@ mod tests {
     fn test_set_and_delete_credential() {
         let mock = MockKeyring::new();
         set_credential_with("srv", "pw", &mock).unwrap();
-        assert!(matches!(
-            get_credential_with("srv", &mock),
-            CredentialResult::Found(_)
-        ));
+        assert!(matches!(get_credential_with("srv", &mock), CredentialResult::Found(_)));
         delete_credential_with("srv", &mock).unwrap();
-        assert!(matches!(
-            get_credential_with("srv", &mock),
-            CredentialResult::NotFound
-        ));
+        assert!(matches!(get_credential_with("srv", &mock), CredentialResult::NotFound));
     }
 
     #[test]

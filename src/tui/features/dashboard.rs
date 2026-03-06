@@ -2,36 +2,29 @@ use std::sync::mpsc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
+    Frame,
     layout::{Alignment, Constraint, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Cell, Clear, Paragraph, Row, Table, Wrap},
-    Frame,
 };
 
+use super::{centered_rect, cert_color, cert_expires_display, status_color, status_display};
+use crate::state::RunStatus;
 use crate::tui::app::{AppEvent, AppState, View, WizardState};
-use super::{cert_color, cert_expires_display, centered_rect, status_color, status_display};
 
 pub fn render(frame: &mut Frame, app: &mut AppState) {
     let area = frame.area();
 
     // Enforce minimum terminal size
     if area.width < 80 || area.height < 10 {
-        let msg = format!(
-            "Terminal too small ({}x{}) - minimum 80x10",
-            area.width, area.height
-        );
+        let msg = format!("Terminal too small ({}x{}) - minimum 80x10", area.width, area.height);
         frame.render_widget(Paragraph::new(msg).alignment(Alignment::Center), area);
         return;
     }
 
     // 3-row vertical layout: title | table | status bar
-    let chunks = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Fill(1),
-        Constraint::Length(1),
-    ])
-    .split(area);
+    let chunks = Layout::vertical([Constraint::Length(1), Constraint::Fill(1), Constraint::Length(1)]).split(area);
 
     render_title_bar(frame, app, chunks[0]);
     render_server_table(frame, app, chunks[1]);
@@ -90,8 +83,19 @@ fn render_server_table(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
                 )
             } else {
                 let text = match state {
-                    Some(s) => status_display(&s.status).to_string(),
-                    None => "· Not run today".to_string(),
+                    Some(s) => {
+                        let base = status_display(&s.status);
+                        if s.status == RunStatus::Fetched {
+                            if let Some(t) = s.last_updated {
+                                format!("{} {}", base, relative_age(&t))
+                            } else {
+                                base.to_string()
+                            }
+                        } else {
+                            base.to_string()
+                        }
+                    }
+                    None => "· Not run yet".to_string(),
                 };
                 let style = match state {
                     Some(s) => status_color(&s.status, app.use_color),
@@ -106,6 +110,13 @@ fn render_server_table(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
                 (cert_expires_display(expires), cert_color(expires, app.use_color))
             };
 
+            // Source badge — vault servers get a "[vault]" indicator
+            let display_name = if super::is_vault_server(app, &server.name) {
+                format!("{} [vault]", server.name)
+            } else {
+                server.name.clone()
+            };
+
             // NAME column — bold if row recently updated (flash)
             let name_style = if is_flashing {
                 Style::default().add_modifier(Modifier::BOLD)
@@ -114,7 +125,7 @@ fn render_server_table(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
             };
 
             Row::new(vec![
-                Cell::from(server.name.clone()).style(name_style),
+                Cell::from(display_name).style(name_style),
                 Cell::from(cert_str).style(cert_style),
                 Cell::from(status_text).style(status_style),
             ])
@@ -122,9 +133,9 @@ fn render_server_table(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
         .collect();
 
     let widths = [
-        Constraint::Fill(1),     // NAME
-        Constraint::Length(13),  // CERT EXPIRES (YYYY-MM-DD + padding)
-        Constraint::Length(20),  // STATUS (fits "⚠ No credential" + spinner)
+        Constraint::Fill(1),    // NAME
+        Constraint::Length(13), // CERT EXPIRES (YYYY-MM-DD + padding)
+        Constraint::Length(20), // STATUS (fits "⚠ No credential" + spinner)
     ];
 
     let highlight_style = if app.use_color {
@@ -175,7 +186,10 @@ fn render_status_bar(frame: &mut Frame, app: &AppState, area: ratatui::layout::R
 /// Error overlay — displays an error message over the dimmed dashboard.
 pub fn render_error_overlay(frame: &mut Frame, message: &str) {
     let area = frame.area();
-    let popup_width = (message.len() as u16 + 6).max(40).min(area.width.saturating_sub(4)).min(70);
+    let popup_width = (message.len() as u16 + 6)
+        .max(40)
+        .min(area.width.saturating_sub(4))
+        .min(70);
     let popup_area = centered_rect(popup_width, 7, area);
 
     frame.render_widget(Clear, popup_area);
@@ -211,10 +225,7 @@ pub fn render_delete_confirm(frame: &mut Frame, _app: &AppState, server_name: &s
     frame.render_widget(block, popup_area);
 
     let msg = format!("  Delete \"{}\"? [y/N]", server_name);
-    frame.render_widget(
-        Paragraph::new(Line::from(msg)).alignment(Alignment::Center),
-        inner,
-    );
+    frame.render_widget(Paragraph::new(Line::from(msg)).alignment(Alignment::Center), inner);
 }
 
 pub fn handle_key(
@@ -265,6 +276,10 @@ pub fn handle_key(
         }
         KeyCode::Char('c') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             if let Some(name) = selected_name {
+                if super::is_vault_server(app, &name) {
+                    app.notification = Some(("Credentials managed by vault".to_string(), std::time::Instant::now()));
+                    return false;
+                }
                 app.view = View::CredentialMenu(name);
             }
         }
@@ -278,6 +293,13 @@ pub fn handle_key(
         }
         KeyCode::Char('D') => {
             if let Some(name) = selected_name {
+                if super::is_vault_server(app, &name) {
+                    app.notification = Some((
+                        "Vault servers are managed in Bitwarden".to_string(),
+                        std::time::Instant::now(),
+                    ));
+                    return false;
+                }
                 app.view = View::DeleteConfirm(name);
             }
         }
@@ -336,20 +358,28 @@ fn perform_delete(app: &mut AppState, server_name: &str) {
         app.table_state.select_last();
     }
 
-    app.notification = Some((
-        format!("Deleted server: {}", server_name),
-        std::time::Instant::now(),
-    ));
+    app.notification = Some((format!("Deleted server: {}", server_name), std::time::Instant::now()));
     app.view = View::Dashboard;
+}
+
+fn relative_age(dt: &chrono::DateTime<chrono::Utc>) -> String {
+    let secs = (chrono::Utc::now() - *dt).num_seconds().max(0);
+    if secs < 3600 {
+        "just now".to_string()
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else if secs < 7 * 86_400 {
+        format!("{}d ago", secs / 86_400)
+    } else {
+        format!("{}w ago", secs / (7 * 86_400))
+    }
 }
 
 fn open_editor(terminal: &mut ratatui::DefaultTerminal, app: &mut AppState) {
     ratatui::restore();
 
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
-    let _ = std::process::Command::new(&editor)
-        .arg(&app.config_path)
-        .status();
+    let _ = std::process::Command::new(&editor).arg(&app.config_path).status();
 
     // Reinit terminal and overwrite the handle in place
     *terminal = ratatui::init();

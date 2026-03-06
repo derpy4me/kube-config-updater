@@ -1,13 +1,13 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
+    Frame,
     style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, Paragraph},
-    Frame,
 };
 
-use crate::tui::app::{AppState, View};
 use super::{centered_rect, render_dim_background};
+use crate::tui::app::{AppState, View};
 
 pub fn render_menu(frame: &mut Frame, _app: &AppState, server_name: &str) {
     render_dim_background(frame, frame.area());
@@ -73,10 +73,8 @@ pub fn handle_key_menu(app: &mut AppState, name: String, key: KeyEvent) -> bool 
         KeyCode::Char('d') | KeyCode::Char('D') => {
             match crate::credentials::delete_credential(&name) {
                 Ok(()) => {
-                    app.notification = Some((
-                        format!("Credential deleted for '{}'", name),
-                        std::time::Instant::now(),
-                    ));
+                    app.cred_cache.insert(name.clone(), false);
+                    app.notification = Some((format!("Credential deleted for '{}'", name), std::time::Instant::now()));
                 }
                 Err(e) => {
                     let msg = format!("Couldn't delete credential: {}", e);
@@ -107,10 +105,8 @@ pub fn handle_key_input(app: &mut AppState, name: String, key: KeyEvent) -> bool
             app.credential_input.clear();
             match crate::credentials::set_credential(&name, &password) {
                 Ok(()) => {
-                    app.notification = Some((
-                        format!("Credential saved for '{}'", name),
-                        std::time::Instant::now(),
-                    ));
+                    app.cred_cache.insert(name.clone(), true);
+                    app.notification = Some((format!("Credential saved for '{}'", name), std::time::Instant::now()));
                     app.view = View::Dashboard;
                 }
                 Err(e) => {

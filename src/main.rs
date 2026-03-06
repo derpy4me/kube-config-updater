@@ -3,6 +3,7 @@ use flexi_logger::{FileSpec, Logger, WriteMode};
 use std::fs;
 use std::path::PathBuf;
 
+mod bitwarden;
 mod config;
 mod credentials;
 mod fetch;
@@ -10,7 +11,6 @@ mod kube;
 mod ssh;
 mod state;
 pub mod tui;
-
 
 #[derive(Subcommand, Debug)]
 enum Commands {
@@ -142,57 +142,105 @@ fn main() -> Result<(), anyhow::Error> {
     }
 
     // CLI and credential commands require a valid config
-    let config = config::load_config(config_path.to_str().unwrap_or_default())?;
+    let mut config = config::load_config(config_path.to_str().unwrap_or_default())?;
     log::info!("Found {} servers in config", config.servers.len());
 
     match cli.command {
-        Some(Commands::Credential { action }) => {
-            match action {
-                CredentialAction::Set { server, default, password } => {
-                    let account = if default {
-                        credentials::DEFAULT_ACCOUNT.to_string()
+        Some(Commands::Credential { action }) => match action {
+            CredentialAction::Set {
+                server,
+                default,
+                password,
+            } => {
+                let account = if default {
+                    credentials::DEFAULT_ACCOUNT.to_string()
+                } else {
+                    server.ok_or_else(|| anyhow::anyhow!("Specify --server <name> or --default"))?
+                };
+                let pw = match password {
+                    Some(p) => p,
+                    None => rpassword::prompt_password("Password: ")
+                        .map_err(|e| anyhow::anyhow!("Failed to read password: {}", e))?,
+                };
+                credentials::set_credential(&account, &pw).map_err(|e| anyhow::anyhow!("{}", e))?;
+                println!("Credential stored for '{}'.", account);
+            }
+            CredentialAction::Delete { server, default } => {
+                let account = if default {
+                    credentials::DEFAULT_ACCOUNT.to_string()
+                } else {
+                    server.ok_or_else(|| anyhow::anyhow!("Specify --server <name> or --default"))?
+                };
+                credentials::delete_credential(&account).map_err(|e| anyhow::anyhow!("{}", e))?;
+                println!("Credential deleted for '{}'.", account);
+            }
+            CredentialAction::List => {
+                let server_names: Vec<&str> = config.servers.iter().map(|s| s.name.as_str()).collect();
+                let results = credentials::check_credentials(&server_names);
+                println!("{:<30} CREDENTIAL", "SERVER");
+                println!("{}", "-".repeat(40));
+                let default_results = credentials::check_credentials(&[credentials::DEFAULT_ACCOUNT]);
+                if let Some((_, default_result)) = default_results.first() {
+                    let status = if matches!(default_result, credentials::CredentialResult::Found(_)) {
+                        "[SET]"
                     } else {
-                        server.ok_or_else(|| anyhow::anyhow!("Specify --server <name> or --default"))?
+                        "[NOT SET]"
                     };
-                    let pw = match password {
-                        Some(p) => p,
-                        None => rpassword::prompt_password("Password: ")
-                            .map_err(|e| anyhow::anyhow!("Failed to read password: {}", e))?,
-                    };
-                    credentials::set_credential(&account, &pw)
-                        .map_err(|e| anyhow::anyhow!("{}", e))?;
-                    println!("Credential stored for '{}'.", account);
+                    println!("{:<30} {}", "_default", status);
                 }
-                CredentialAction::Delete { server, default } => {
-                    let account = if default {
-                        credentials::DEFAULT_ACCOUNT.to_string()
+                for (name, result) in &results {
+                    let status = if matches!(result, credentials::CredentialResult::Found(_)) {
+                        "[SET]"
                     } else {
-                        server.ok_or_else(|| anyhow::anyhow!("Specify --server <name> or --default"))?
+                        "[NOT SET]"
                     };
-                    credentials::delete_credential(&account)
-                        .map_err(|e| anyhow::anyhow!("{}", e))?;
-                    println!("Credential deleted for '{}'.", account);
-                }
-                CredentialAction::List => {
-                    let server_names: Vec<&str> = config.servers.iter().map(|s| s.name.as_str()).collect();
-                    let results = credentials::check_credentials(&server_names);
-                    println!("{:<30} CREDENTIAL", "SERVER");
-                    println!("{}", "-".repeat(40));
-                    let default_results = credentials::check_credentials(&[credentials::DEFAULT_ACCOUNT]);
-                    if let Some((_, default_result)) = default_results.first() {
-                        let status = if matches!(default_result, credentials::CredentialResult::Found(_)) { "[SET]" } else { "[NOT SET]" };
-                        println!("{:<30} {}", "_default", status);
-                    }
-                    for (name, result) in &results {
-                        let status = if matches!(result, credentials::CredentialResult::Found(_)) { "[SET]" } else { "[NOT SET]" };
-                        println!("{:<30} {}", name, status);
-                    }
+                    println!("{:<30} {}", name, status);
                 }
             }
-        }
+        },
         Some(Commands::Tui) => unreachable!("handled above"),
         None => {
-            fetch::process_servers(&config, &cli.servers, cli.dry_run)?;
+            let vault_passwords = if let Some(bw_config) = config.bitwarden.clone() {
+                if bw_config.enabled {
+                    if !bitwarden::BwCli::is_available() {
+                        anyhow::bail!(
+                            "Bitwarden CLI (bw) not found but [bitwarden] is enabled in config. \
+                             Install: npm i -g @bitwarden/cli"
+                        );
+                    }
+
+                    if let Some(ref pf) = bw_config.password_file
+                        && let Err(warning) = bitwarden::check_password_file_permissions(pf)
+                    {
+                        log::warn!("{}", warning);
+                    }
+
+                    let mut bw_cli = bitwarden::BwCli::new().with_server_url(bw_config.server_url.as_deref());
+
+                    bw_cli
+                        .ensure_session(bw_config.password_file.as_deref())
+                        .map_err(|e| anyhow::anyhow!("Bitwarden: {}", e))?;
+
+                    let prefix = bw_config.item_prefix.as_deref().unwrap_or("k3s:");
+                    let (vault_servers, skipped) = bw_cli
+                        .fetch_servers(prefix, bw_config.collection.as_deref())
+                        .map_err(|e| anyhow::anyhow!("Bitwarden fetch: {}", e))?;
+
+                    for s in &skipped {
+                        log::warn!("Vault item skipped: {}", s);
+                    }
+                    let (merged, _sources, passwords) = bitwarden::merge_servers(&config.servers, vault_servers);
+                    config.servers = merged;
+                    log::info!("Loaded {} vault server(s), {} skipped", passwords.len(), skipped.len());
+                    passwords
+                } else {
+                    std::collections::HashMap::new()
+                }
+            } else {
+                std::collections::HashMap::new()
+            };
+
+            fetch::process_servers(&config, &cli.servers, cli.dry_run, &vault_passwords)?;
         }
     }
 

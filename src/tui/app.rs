@@ -1,7 +1,8 @@
+use crossterm::event::KeyEvent;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use crossterm::event::KeyEvent;
 
+use crate::bitwarden::ServerSource;
 use crate::config::Config;
 use crate::state::ServerRunState;
 
@@ -10,6 +11,9 @@ use crate::state::ServerRunState;
 /// Sentinel used in `in_progress` to track a wizard connection test.
 /// Kept as a constant to avoid the same magic string appearing across multiple files.
 pub const WIZARD_SENTINEL: &str = "__wizard__";
+
+/// Sentinel used in `in_progress` while a Bitwarden vault unlock is running.
+pub const BITWARDEN_SENTINEL: &str = "__bitwarden__";
 
 pub enum AppEvent {
     Key(KeyEvent),
@@ -27,6 +31,9 @@ pub enum AppEvent {
         result: Result<Option<chrono::DateTime<chrono::Utc>>, String>,
     },
     StateFileChanged,
+    BitwardenComplete {
+        result: Result<(Vec<crate::bitwarden::VaultServer>, Vec<String>), String>,
+    },
 }
 
 // ─── Probe State ──────────────────────────────────────────────────────────────
@@ -43,12 +50,12 @@ pub enum ProbeState {
 #[allow(clippy::large_enum_variant)]
 pub enum View {
     Dashboard,
-    Detail(String),              // server name
+    Detail(String), // server name
     Wizard(WizardState),
     SetupWizard(SetupWizardState),
-    CredentialMenu(String),      // server name
-    CredentialInput(String),     // server name
-    DeleteConfirm(String),       // server name
+    CredentialMenu(String),  // server name
+    CredentialInput(String), // server name
+    DeleteConfirm(String),   // server name
     Help,
     Error {
         message: String,
@@ -60,6 +67,67 @@ pub enum View {
         password: String,
         keyring_error: String,
     },
+    BitwardenUnlock {
+        error: Option<String>,
+    },
+    EditServer(EditServerState),
+}
+
+// ─── Edit Server ──────────────────────────────────────────────────────────────
+
+/// In-TUI field editor for a local server. Pre-populated from the current config.
+#[derive(Clone, Debug)]
+pub struct EditServerState {
+    /// Name of the server being edited (not editable — used as the key).
+    pub server_name: String,
+    /// Index of the currently focused field (0-6).
+    pub field_idx: usize,
+    /// Editable field values: [address, target_cluster_ip, user, file_path, file_name, context_name, identity_file]
+    pub fields: [String; 7],
+    pub error: Option<String>,
+}
+
+impl EditServerState {
+    pub const LABELS: [&'static str; 7] = [
+        "Address",
+        "Cluster IP",
+        "SSH user",
+        "Remote path",
+        "Remote filename",
+        "Context name",
+        "Identity file",
+    ];
+
+    pub fn from_server(server: &crate::config::Server) -> Self {
+        EditServerState {
+            server_name: server.name.clone(),
+            field_idx: 0,
+            fields: [
+                server.address.clone(),
+                server.target_cluster_ip.clone(),
+                server.user.clone().unwrap_or_default(),
+                server.file_path.clone().unwrap_or_default(),
+                server.file_name.clone().unwrap_or_default(),
+                server.context_name.clone().unwrap_or_default(),
+                server.identity_file.clone().unwrap_or_default(),
+            ],
+            error: None,
+        }
+    }
+
+    pub fn to_server(&self) -> crate::config::Server {
+        let opt = |s: &str| if s.is_empty() { None } else { Some(s.to_string()) };
+        crate::config::Server {
+            name: self.server_name.clone(),
+            address: self.fields[0].clone(),
+            target_cluster_ip: self.fields[1].clone(),
+            user: opt(&self.fields[2]),
+            file_path: opt(&self.fields[3]),
+            file_name: opt(&self.fields[4]),
+            context_name: opt(&self.fields[5]),
+            identity_file: opt(&self.fields[6]),
+        }
+    }
 }
 
 // ─── Setup Wizard ─────────────────────────────────────────────────────────────
@@ -71,6 +139,10 @@ pub struct SetupWizardState {
     pub default_user: String,
     pub default_file_path: String,
     pub default_file_name: String,
+    // Bitwarden steps (shown after DefaultFileName)
+    pub bitwarden_enabled: bool,
+    pub bitwarden_server_url: String,
+    pub bitwarden_item_prefix: String,
     pub error: Option<String>,
 }
 
@@ -81,6 +153,12 @@ pub enum SetupStep {
     DefaultUser,
     DefaultFilePath,
     DefaultFileName,
+    /// "Enable Bitwarden vault integration? [y/N]"
+    BitwardenEnabled,
+    /// Vault server URL (blank = bitwarden.com / self-hosted otherwise)
+    BitwardenServerUrl,
+    /// Item name prefix used to identify k8s servers in the vault
+    BitwardenItemPrefix,
 }
 
 impl SetupStep {
@@ -90,6 +168,9 @@ impl SetupStep {
             SetupStep::DefaultUser => 1,
             SetupStep::DefaultFilePath => 2,
             SetupStep::DefaultFileName => 3,
+            SetupStep::BitwardenEnabled => 4,
+            SetupStep::BitwardenServerUrl => 5,
+            SetupStep::BitwardenItemPrefix => 6,
         }
     }
 
@@ -99,15 +180,23 @@ impl SetupStep {
             SetupStep::DefaultUser => "Default SSH user",
             SetupStep::DefaultFilePath => "Default remote file path",
             SetupStep::DefaultFileName => "Default remote file name",
+            SetupStep::BitwardenEnabled => "Bitwarden vault integration",
+            SetupStep::BitwardenServerUrl => "Vault server URL",
+            SetupStep::BitwardenItemPrefix => "Vault item prefix",
         }
     }
 
+    /// Step after this one. Bitwarden URL/prefix steps are only reached
+    /// if bitwarden_enabled; callers handle the conditional skip themselves.
     pub fn next(&self) -> Option<SetupStep> {
         match self {
             SetupStep::OutputDir => Some(SetupStep::DefaultUser),
             SetupStep::DefaultUser => Some(SetupStep::DefaultFilePath),
             SetupStep::DefaultFilePath => Some(SetupStep::DefaultFileName),
-            SetupStep::DefaultFileName => None,
+            SetupStep::DefaultFileName => Some(SetupStep::BitwardenEnabled),
+            SetupStep::BitwardenEnabled => Some(SetupStep::BitwardenServerUrl),
+            SetupStep::BitwardenServerUrl => Some(SetupStep::BitwardenItemPrefix),
+            SetupStep::BitwardenItemPrefix => None,
         }
     }
 
@@ -117,6 +206,9 @@ impl SetupStep {
             SetupStep::DefaultUser => Some(SetupStep::OutputDir),
             SetupStep::DefaultFilePath => Some(SetupStep::DefaultUser),
             SetupStep::DefaultFileName => Some(SetupStep::DefaultFilePath),
+            SetupStep::BitwardenEnabled => Some(SetupStep::DefaultFileName),
+            SetupStep::BitwardenServerUrl => Some(SetupStep::BitwardenEnabled),
+            SetupStep::BitwardenItemPrefix => Some(SetupStep::BitwardenServerUrl),
         }
     }
 }
@@ -142,7 +234,6 @@ pub struct WizardState {
     pub test_passed: bool,
     pub error: Option<String>,
 }
-
 
 #[derive(Clone, PartialEq, Default)]
 pub enum WizardStep {
@@ -226,11 +317,23 @@ pub struct MaskedInput {
 }
 
 impl MaskedInput {
-    pub fn new() -> Self { MaskedInput { value: String::new() } }
-    pub fn push(&mut self, c: char) { if self.value.len() < 256 { self.value.push(c); } }
-    pub fn pop(&mut self) { self.value.pop(); }
-    pub fn clear(&mut self) { self.value.clear(); }
-    pub fn masked_display(&self) -> String { "*".repeat(self.value.len()) }
+    pub fn new() -> Self {
+        MaskedInput { value: String::new() }
+    }
+    pub fn push(&mut self, c: char) {
+        if self.value.len() < 256 {
+            self.value.push(c);
+        }
+    }
+    pub fn pop(&mut self) {
+        self.value.pop();
+    }
+    pub fn clear(&mut self) {
+        self.value.clear();
+    }
+    pub fn masked_display(&self) -> String {
+        "*".repeat(self.value.len())
+    }
 }
 
 // ─── Spinner ──────────────────────────────────────────────────────────────────
@@ -243,9 +346,15 @@ pub struct SpinnerState {
 }
 
 impl SpinnerState {
-    pub fn new() -> Self { SpinnerState { frame: 0 } }
-    pub fn tick(&mut self) { self.frame = (self.frame + 1) % SPINNER_FRAMES.len(); }
-    pub fn current(&self) -> &str { SPINNER_FRAMES[self.frame] }
+    pub fn new() -> Self {
+        SpinnerState { frame: 0 }
+    }
+    pub fn tick(&mut self) {
+        self.frame = (self.frame + 1) % SPINNER_FRAMES.len();
+    }
+    pub fn current(&self) -> &str {
+        SPINNER_FRAMES[self.frame]
+    }
 }
 
 // ─── App State ────────────────────────────────────────────────────────────────
@@ -255,13 +364,14 @@ pub struct AppState {
     pub config_path: PathBuf,
     pub server_states: HashMap<String, ServerRunState>,
     pub cert_cache: HashMap<String, Option<chrono::DateTime<chrono::Utc>>>,
+    pub cred_cache: HashMap<String, bool>,
     pub in_progress: HashSet<String>,
     pub view: View,
-    pub prior_view: Option<Box<View>>,  // saved when entering Help
+    pub prior_view: Option<Box<View>>, // saved when entering Help
     pub dry_run: bool,
     pub table_state: ratatui::widgets::TableState,
     pub spinner: SpinnerState,
-    pub flash_rows: HashMap<String, u8>,         // server_name → frames remaining
+    pub flash_rows: HashMap<String, u8>, // server_name → frames remaining
     pub notification: Option<(String, std::time::Instant)>,
     pub credential_input: MaskedInput,
     pub use_color: bool,
@@ -270,16 +380,28 @@ pub struct AppState {
     pub pre_fetch_expiry: HashMap<String, Option<chrono::DateTime<chrono::Utc>>>,
     /// Current server cert probe result shown in the detail view.
     pub probe: Option<(String, ProbeState)>,
+    /// Tracks whether each server came from config.toml or Bitwarden vault.
+    pub server_sources: HashMap<String, ServerSource>,
+    /// Passwords sourced from Bitwarden vault, keyed by server name.
+    pub vault_passwords: HashMap<String, String>,
+    /// Bitwarden session key (held in memory only).
+    pub bw_session: Option<String>,
 }
 
 impl AppState {
-    pub fn new(config: Config, config_path: PathBuf, server_states: HashMap<String, ServerRunState>, dry_run: bool) -> Self {
+    pub fn new(
+        config: Config,
+        config_path: PathBuf,
+        server_states: HashMap<String, ServerRunState>,
+        dry_run: bool,
+    ) -> Self {
         let use_color = std::env::var("NO_COLOR").is_err();
         AppState {
             config,
             config_path,
             server_states,
             cert_cache: HashMap::new(),
+            cred_cache: HashMap::new(),
             in_progress: HashSet::new(),
             view: View::Dashboard,
             prior_view: None,
@@ -293,6 +415,9 @@ impl AppState {
             last_state_mtime: None,
             pre_fetch_expiry: HashMap::new(),
             probe: None,
+            server_sources: HashMap::new(),
+            vault_passwords: HashMap::new(),
+            bw_session: None,
         }
     }
 
@@ -307,6 +432,18 @@ impl AppState {
                 _ => None,
             };
             self.cert_cache.insert(server.name.clone(), expiry);
+        }
+    }
+
+    /// Checks whether a credential is stored for each server and caches the result.
+    /// Avoids repeated keyring/D-Bus/process calls on every render frame.
+    pub fn refresh_cred_cache(&mut self) {
+        for server in &self.config.servers {
+            let stored = matches!(
+                crate::credentials::get_credential(&server.name),
+                crate::credentials::CredentialResult::Found(_)
+            );
+            self.cred_cache.insert(server.name.clone(), stored);
         }
     }
 }

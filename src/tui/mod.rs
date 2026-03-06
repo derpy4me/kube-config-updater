@@ -13,6 +13,66 @@ pub fn run_tui(config: Config, config_path: std::path::PathBuf, dry_run: bool) -
     let server_states = state::read_state().unwrap_or_default();
     let mut app = AppState::new(config, config_path, server_states, dry_run);
     app.refresh_cert_cache();
+    app.refresh_cred_cache();
+    // Bitwarden vault integration
+    if let Some(ref bw_config) = app.config.bitwarden.clone()
+        && bw_config.enabled
+    {
+        if !crate::bitwarden::BwCli::is_available() {
+            app.view = View::Error {
+                message: "Bitwarden CLI (bw) not found. Install: npm i -g @bitwarden/cli".to_string(),
+            };
+        } else {
+            // Check password_file permissions if configured
+            if let Some(ref pf) = bw_config.password_file
+                && let Err(warning) = crate::bitwarden::check_password_file_permissions(pf)
+            {
+                log::warn!("{}", warning);
+            }
+
+            // Try auto-session (BW_SESSION env or headless)
+            let mut bw_cli = crate::bitwarden::BwCli::new().with_server_url(bw_config.server_url.as_deref());
+
+            match bw_cli.ensure_session(bw_config.password_file.as_deref()) {
+                Ok(()) => {
+                    // Session acquired — fetch vault servers
+                    let prefix = bw_config.item_prefix.as_deref().unwrap_or("k3s:");
+                    match bw_cli.fetch_servers(prefix, bw_config.collection.as_deref()) {
+                        Ok((vault_servers, skipped)) => {
+                            let (merged, sources, passwords) =
+                                crate::bitwarden::merge_servers(&app.config.servers, vault_servers);
+                            app.config.servers = merged;
+                            app.server_sources = sources;
+                            app.vault_passwords = passwords;
+                            app.refresh_cert_cache();
+                            app.refresh_cred_cache();
+                            if !skipped.is_empty() {
+                                app.notification = Some((
+                                    format!(
+                                        "{} vault item(s) skipped (missing fields: {})",
+                                        skipped.len(),
+                                        skipped.join("; ")
+                                    ),
+                                    std::time::Instant::now(),
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            app.notification = Some((format!("Vault fetch failed: {}", e), std::time::Instant::now()));
+                        }
+                    }
+                }
+                Err(e) => {
+                    if e.contains("locked") || e.contains("Locked") {
+                        app.view = View::BitwardenUnlock { error: None };
+                    } else {
+                        app.view = View::Error { message: e };
+                    }
+                }
+            }
+        }
+    }
+
     if !app.config.servers.is_empty() {
         app.table_state.select(Some(0));
     }
@@ -26,14 +86,21 @@ pub fn run_tui_setup(config_path: std::path::PathBuf, dry_run: bool) -> anyhow::
         default_file_name: None,
         default_identity_file: None,
         local_output_dir: String::new(),
+        bitwarden: None,
         servers: vec![],
     };
 
     let initial_output_dir = dirs::home_dir()
-        .map(|mut p| { p.push(".kube"); p.to_string_lossy().into_owned() })
+        .map(|mut p| {
+            p.push(".kube");
+            p.to_string_lossy().into_owned()
+        })
         .unwrap_or_else(|| String::from("/tmp/kube"));
 
-    let setup = SetupWizardState { output_dir: initial_output_dir, ..Default::default() };
+    let setup = SetupWizardState {
+        output_dir: initial_output_dir,
+        ..Default::default()
+    };
 
     let mut app = AppState::new(empty_config, config_path, std::collections::HashMap::new(), dry_run);
     app.view = View::SetupWizard(setup);
@@ -49,10 +116,14 @@ fn run_app(mut app: AppState) -> anyhow::Result<()> {
         loop {
             match crossterm::event::read() {
                 Ok(crossterm::event::Event::Key(k)) => {
-                    if tx_events.send(AppEvent::Key(k)).is_err() { break; }
+                    if tx_events.send(AppEvent::Key(k)).is_err() {
+                        break;
+                    }
                 }
                 Ok(crossterm::event::Event::Resize(w, h)) => {
-                    if tx_events.send(AppEvent::Resize(w, h)).is_err() { break; }
+                    if tx_events.send(AppEvent::Resize(w, h)).is_err() {
+                        break;
+                    }
                 }
                 _ => {}
             }
@@ -63,13 +134,16 @@ fn run_app(mut app: AppState) -> anyhow::Result<()> {
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(Duration::from_millis(100));
-            if tx_tick.send(AppEvent::Tick).is_err() { break; }
+            if tx_tick.send(AppEvent::Tick).is_err() {
+                break;
+            }
         }
     });
 
     let tx_watcher = tx.clone();
     std::thread::spawn(move || {
-        let path = std::path::Path::new(state::STATE_FILE);
+        let state_path = state::state_file_path();
+        let path = state_path.as_path();
         let mut last_mtime: Option<std::time::SystemTime> = None;
         loop {
             std::thread::sleep(Duration::from_secs(2));
@@ -78,7 +152,9 @@ fn run_app(mut app: AppState) -> anyhow::Result<()> {
                 && last_mtime.map(|m| m != mtime).unwrap_or(true)
             {
                 last_mtime = Some(mtime);
-                if tx_watcher.send(AppEvent::StateFileChanged).is_err() { break; }
+                if tx_watcher.send(AppEvent::StateFileChanged).is_err() {
+                    break;
+                }
             }
         }
     });
@@ -91,15 +167,13 @@ fn run_app(mut app: AppState) -> anyhow::Result<()> {
 
 /// Record pre-fetch cert state, mark server as in-progress, and spawn a forced fetch.
 /// Centralises the three-step setup that every fetch-triggering key handler needs.
-pub(crate) fn start_fetch(
-    app: &mut AppState,
-    server: crate::config::Server,
-    tx: &mpsc::Sender<AppEvent>,
-) {
+pub(crate) fn start_fetch(app: &mut AppState, server: crate::config::Server, tx: &mpsc::Sender<AppEvent>) {
     let name = server.name.clone();
-    app.pre_fetch_expiry.insert(name.clone(), app.cert_cache.get(&name).copied().flatten());
+    let vault_pw = app.vault_passwords.get(&name).cloned();
+    app.pre_fetch_expiry
+        .insert(name.clone(), app.cert_cache.get(&name).copied().flatten());
     app.in_progress.insert(name);
-    spawn_fetch(server, app.config.clone(), app.dry_run, true, tx.clone());
+    spawn_fetch(server, app.config.clone(), app.dry_run, true, vault_pw, tx.clone());
 }
 
 pub(crate) fn spawn_fetch(
@@ -107,10 +181,11 @@ pub(crate) fn spawn_fetch(
     config: crate::config::Config,
     dry_run: bool,
     force: bool,
+    vault_password: Option<String>,
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || {
-        let result = crate::fetch::process_server(&server, &config, dry_run, force)
+        let result = crate::fetch::process_server(&server, &config, dry_run, force, vault_password.as_deref())
             .map(|_| ())
             .map_err(|e| friendly_error(&e));
         tx.send(AppEvent::FetchComplete {
@@ -135,7 +210,11 @@ fn build_fetch_notification(
     match new_expiry {
         None => format!("{}: fetched", server_name),
         Some(exp) if exp <= now => {
-            format!("{}: fetched — cert expired {} (renew on server)", server_name, exp.format("%Y-%m-%d"))
+            format!(
+                "{}: fetched — cert expired {} (renew on server)",
+                server_name,
+                exp.format("%Y-%m-%d")
+            )
         }
         Some(exp) => {
             let prev_was_expired = pre_expiry.flatten().map(|pre| pre <= now).unwrap_or(false);
@@ -170,14 +249,19 @@ fn event_loop(
             }
             Ok(AppEvent::Tick) => {
                 app.spinner.tick();
-                app.flash_rows.retain(|_, v| { *v = v.saturating_sub(1); *v > 0 });
+                app.flash_rows.retain(|_, v| {
+                    *v = v.saturating_sub(1);
+                    *v > 0
+                });
                 if let Some((_, ts)) = &app.notification
                     && ts.elapsed() > Duration::from_secs(3)
                 {
                     app.notification = None;
                 }
                 // Skip redraw if nothing needs animating
-                let probe_active = app.probe.as_ref()
+                let probe_active = app
+                    .probe
+                    .as_ref()
                     .map(|(_, s)| matches!(s, ProbeState::Probing))
                     .unwrap_or(false);
                 if app.in_progress.is_empty()
@@ -234,21 +318,25 @@ fn event_loop(
                     log::warn!("Could not write state file: {}", e);
                 }
             }
+            Ok(AppEvent::BitwardenComplete { result }) => {
+                features::bitwarden::on_complete(app, result);
+            }
             Ok(AppEvent::WizardTestComplete { result }) => {
                 features::wizard::on_test_complete(app, result);
             }
-            Ok(AppEvent::StateFileChanged) => {
-                match state::read_state() {
-                    Ok(new_states) => {
-                        app.server_states = new_states;
-                        app.refresh_cert_cache();
-                        app.notification = Some(("State refreshed".to_string(), std::time::Instant::now()));
-                    }
-                    Err(_) => {
-                        app.notification = Some(("State file unreadable — showing cached data".to_string(), std::time::Instant::now()));
-                    }
+            Ok(AppEvent::StateFileChanged) => match state::read_state() {
+                Ok(new_states) => {
+                    app.server_states = new_states;
+                    app.refresh_cert_cache();
+                    app.notification = Some(("State refreshed".to_string(), std::time::Instant::now()));
                 }
-            }
+                Err(_) => {
+                    app.notification = Some((
+                        "State file unreadable — showing cached data".to_string(),
+                        std::time::Instant::now(),
+                    ));
+                }
+            },
             Err(_) => break, // channel closed
         }
     }
@@ -261,6 +349,7 @@ fn render_app(frame: &mut ratatui::Frame, app: &mut AppState) {
     enum ViewKind {
         Dashboard,
         Detail(String),
+        EditServer,
         Wizard,
         SetupWizard,
         Help,
@@ -269,11 +358,13 @@ fn render_app(frame: &mut ratatui::Frame, app: &mut AppState) {
         CredentialInput(String),
         DeleteConfirm(String),
         KeyringFallbackConsent(String, String), // (server_name, keyring_error)
+        BitwardenUnlock,
     }
 
     let kind = match &app.view {
         View::Dashboard => ViewKind::Dashboard,
         View::Detail(name) => ViewKind::Detail(name.clone()),
+        View::EditServer(_) => ViewKind::EditServer,
         View::Wizard(_) => ViewKind::Wizard,
         View::SetupWizard(_) => ViewKind::SetupWizard,
         View::Help => ViewKind::Help,
@@ -281,14 +372,26 @@ fn render_app(frame: &mut ratatui::Frame, app: &mut AppState) {
         View::CredentialMenu(name) => ViewKind::CredentialMenu(name.clone()),
         View::CredentialInput(name) => ViewKind::CredentialInput(name.clone()),
         View::DeleteConfirm(name) => ViewKind::DeleteConfirm(name.clone()),
-        View::KeyringFallbackConsent { server_name, keyring_error, .. } => {
-            ViewKind::KeyringFallbackConsent(server_name.clone(), keyring_error.clone())
-        }
+        View::KeyringFallbackConsent {
+            server_name,
+            keyring_error,
+            ..
+        } => ViewKind::KeyringFallbackConsent(server_name.clone(), keyring_error.clone()),
+        View::BitwardenUnlock { .. } => ViewKind::BitwardenUnlock,
     };
 
     match kind {
         ViewKind::Dashboard => features::dashboard::render(frame, app),
         ViewKind::Detail(name) => features::detail::render(frame, app, &name),
+        ViewKind::EditServer => {
+            let state = match &app.view {
+                View::EditServer(s) => s.clone(),
+                _ => unreachable!(),
+            };
+            features::detail::render(frame, app, &state.server_name);
+            features::render_dim_background(frame, frame.area());
+            features::edit_server::render(frame, app, &state);
+        }
         ViewKind::Wizard => {
             let ws = match &app.view {
                 View::Wizard(ws) => ws.clone(),
@@ -331,6 +434,7 @@ fn render_app(frame: &mut ratatui::Frame, app: &mut AppState) {
             features::dashboard::render(frame, app);
             features::keyring_fallback::render(frame, app, &server_name, &keyring_error);
         }
+        ViewKind::BitwardenUnlock => features::bitwarden::render(frame, app),
     }
 }
 
@@ -343,23 +447,29 @@ fn handle_key(
     use crossterm::event::{KeyCode, KeyModifiers};
 
     // Global: Ctrl+C and Ctrl+D always quit regardless of the active view.
-    if key.modifiers.contains(KeyModifiers::CONTROL)
-        && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('d'))
-    {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('d')) {
         return true;
     }
 
     match &app.view {
         View::Dashboard => features::dashboard::handle_key(app, key, tx, terminal),
         View::Detail(name) => features::detail::handle_key(app, name.clone(), key, tx),
+        View::EditServer(_) => features::edit_server::handle_key(app, key),
         View::DeleteConfirm(name) => features::dashboard::handle_key_delete_confirm(app, name.clone(), key),
-        View::Help => { features::help::handle_key(app, key); false }
-        View::Error { .. } => { app.view = View::Dashboard; false }
+        View::Help => {
+            features::help::handle_key(app, key);
+            false
+        }
+        View::Error { .. } => {
+            app.view = View::Dashboard;
+            false
+        }
         View::CredentialMenu(name) => features::credentials::handle_key_menu(app, name.clone(), key),
         View::CredentialInput(name) => features::credentials::handle_key_input(app, name.clone(), key),
         View::Wizard(_) => features::wizard::handle_key(app, key, tx),
         View::SetupWizard(_) => features::setup::handle_key(app, key, tx),
         View::KeyringFallbackConsent { .. } => features::keyring_fallback::handle_key(app, key),
+        View::BitwardenUnlock { .. } => features::bitwarden::handle_key(app, key, tx),
     }
 }
 
@@ -374,7 +484,8 @@ pub fn friendly_error(e: &anyhow::Error) -> String {
         return "Password rejected by server. Check credentials with 'c'.".to_string();
     }
     if lower.contains("sudo") || lower.contains("permission denied") {
-        return "Connected but couldn't read the remote file — sudo may require a password or the path may be wrong.".to_string();
+        return "Connected but couldn't read the remote file — sudo may require a password or the path may be wrong."
+            .to_string();
     }
     if lower.contains("yaml") || lower.contains("parse") {
         return "Remote file doesn't look like a kubeconfig — check the file path in config.".to_string();
@@ -385,7 +496,15 @@ pub fn friendly_error(e: &anyhow::Error) -> String {
     if lower.contains("keyring") || lower.contains("secret service") {
         return "OS keyring is locked or unavailable. Log in to unlock it, then retry.".to_string();
     }
+    if lower.contains("bw") && (lower.contains("not found") || lower.contains("no such file")) {
+        return "Bitwarden CLI (bw) not installed. Run: npm i -g @bitwarden/cli".to_string();
+    }
+    if lower.contains("vault") && lower.contains("locked") {
+        return "Vault is locked — unlock with your master password.".to_string();
+    }
+    if lower.contains("invalid master password") || lower.contains("invalid password") {
+        return "Wrong master password. Try again.".to_string();
+    }
     // Fallback: return original
     s
 }
-

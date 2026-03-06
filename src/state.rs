@@ -1,10 +1,22 @@
-use std::collections::HashMap;
-use std::path::Path;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
-pub const STATE_FILE: &str = "/tmp/kube_config_updater_state.json";
-const STATE_FILE_TMP: &str = "/tmp/kube_config_updater_state.json.tmp";
+/// Legacy path written by older versions. Migrated automatically on first read.
+const STATE_FILE_LEGACY: &str = "/tmp/kube_config_updater_state.json";
+
+/// Returns `~/.local/share/kube_config_updater/` (or `/tmp/` as fallback).
+fn state_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join("kube_config_updater")
+}
+
+/// Returns the path to the persistent state file.
+pub fn state_file_path() -> PathBuf {
+    state_dir().join("state.json")
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ServerRunState {
@@ -22,22 +34,39 @@ pub enum RunStatus {
     Failed,
 }
 
-/// Read state file. Returns empty map if file does not exist.
+/// Read the persistent state file. Migrates from the legacy `/tmp` path on first run.
+/// Returns an empty map if neither file exists.
 pub fn read_state() -> Result<HashMap<String, ServerRunState>, anyhow::Error> {
-    let path = Path::new(STATE_FILE);
+    let path = state_file_path();
+
+    // One-time migration: if persistent file is absent but legacy file exists, adopt it.
     if !path.exists() {
+        let legacy = Path::new(STATE_FILE_LEGACY);
+        if legacy.exists()
+            && let Ok(content) = std::fs::read_to_string(legacy)
+            && let Ok(map) = serde_json::from_str::<HashMap<String, ServerRunState>>(&content)
+        {
+            // Best-effort write to new location; ignore errors (will retry on next fetch).
+            let _ = write_state(&map);
+            return Ok(map);
+        }
         return Ok(HashMap::new());
     }
-    let content = std::fs::read_to_string(path)?;
+
+    let content = std::fs::read_to_string(&path)?;
     let map = serde_json::from_str(&content)?;
     Ok(map)
 }
 
-/// Write state file atomically (write to .tmp then rename).
+/// Write state file atomically to the persistent data dir.
 pub fn write_state(states: &HashMap<String, ServerRunState>) -> Result<(), anyhow::Error> {
+    let dir = state_dir();
+    std::fs::create_dir_all(&dir)?;
+    let tmp = dir.join("state.json.tmp");
+    let dest = dir.join("state.json");
     let json = serde_json::to_string_pretty(states)?;
-    std::fs::write(STATE_FILE_TMP, &json)?;
-    std::fs::rename(STATE_FILE_TMP, STATE_FILE)?;
+    std::fs::write(&tmp, &json)?;
+    std::fs::rename(&tmp, &dest)?;
     Ok(())
 }
 
@@ -76,8 +105,9 @@ mod tests {
     #[test]
     fn test_read_state_missing_file_returns_empty() {
         let _guard = STATE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // Remove the state file so we get a clean "missing" state
-        let _ = std::fs::remove_file(STATE_FILE);
+        // Remove both the persistent and legacy files so we get a clean "missing" state.
+        let _ = std::fs::remove_file(state_file_path());
+        let _ = std::fs::remove_file(STATE_FILE_LEGACY);
         let result = read_state();
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
@@ -88,11 +118,14 @@ mod tests {
         let _guard = STATE_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut states = HashMap::new();
         states.insert("server1".to_string(), make_state(RunStatus::Fetched));
-        states.insert("server2".to_string(), ServerRunState {
-            status: RunStatus::Failed,
-            last_updated: Some(Utc::now()),
-            error: Some("Connection refused".to_string()),
-        });
+        states.insert(
+            "server2".to_string(),
+            ServerRunState {
+                status: RunStatus::Failed,
+                last_updated: Some(Utc::now()),
+                error: Some("Connection refused".to_string()),
+            },
+        );
 
         write_state(&states).expect("write should succeed");
         let loaded = read_state().expect("read should succeed");
@@ -111,8 +144,7 @@ mod tests {
         write_state(&initial).expect("write should succeed");
 
         // Update should add server2 without removing server1
-        update_server_state("new_server", make_state(RunStatus::Fetched))
-            .expect("update should succeed");
+        update_server_state("new_server", make_state(RunStatus::Fetched)).expect("update should succeed");
 
         let loaded = read_state().expect("read should succeed");
         assert!(loaded.contains_key("existing"));

@@ -55,7 +55,8 @@ pub fn fetch_remote_file(
                 "No password or identity file configured for '{}'. \
                  SSH agent authentication failed: {}. \
                  Use 'c' in the dashboard to add credentials.",
-                server_name, e
+                server_name,
+                e
             )
         })?;
     }

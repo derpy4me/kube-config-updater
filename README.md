@@ -245,12 +245,167 @@ Status values: `Fetched` · `Skipped` · `NoCredential` · `AuthRejected` · `Fa
 
 ---
 
+## Bitwarden / Vaultwarden Integration
+
+Server configs and SSH credentials can optionally be sourced from a Bitwarden or Vaultwarden vault. This enables company-managed access control — admins define which servers each team member can access via Bitwarden organizations and collections.
+
+**This is additive** — the existing keyring + file fallback system remains the default.
+
+### Prerequisites
+
+Before enabling vault integration, do this once in your terminal:
+
+```bash
+# 1. Install the Bitwarden CLI
+npm install -g @bitwarden/cli
+
+# 2. (Self-hosted only) Point bw at your Vaultwarden instance
+bw config server https://vault.your-company.com
+
+# 3. Log in to your vault
+bw login
+```
+
+You do not need to unlock the vault manually — the TUI and CLI handle that.
+
+### Setup via TUI (recommended)
+
+When you launch `kube_config_updater tui` for the first time (no config file), the setup wizard runs automatically. Step 5 asks:
+
+```
+Step 5 of 5 — Bitwarden vault integration
+  Enable Bitwarden/Vaultwarden vault? [n]
+  ────────────────────────────────────────
+  Pull server list and SSH passwords from your Bitwarden vault
+
+  y:enable  Enter/n:skip  Esc:back
+```
+
+Press **y**, then fill in the server URL (blank for bitwarden.com) and item prefix.
+
+### Manual config
+
+Add a `[bitwarden]` section to `~/.kube_config_updater/config.toml`:
+
+```toml
+[bitwarden]
+enabled = true
+server_url = "https://vault.your-company.com"  # omit for bitwarden.com
+collection = "K3s Production"                  # collection name or UUID; omit for all items
+item_prefix = "k3s:"                           # only items whose name starts with this are imported
+```
+
+### Vault item format
+
+Each server is a **Login item** in your vault:
+
+| Bitwarden field | Maps to | Required |
+|---|---|---|
+| Item name (after prefix strip) | Server name | yes |
+| `login.username` | SSH user | no |
+| `login.password` | SSH password | no |
+| Custom field `address` | SSH hostname/IP | yes |
+| Custom field `target_cluster_ip` | Cluster IP for kubeconfig | yes |
+| Custom field `file_path` | Remote file directory | no |
+| Custom field `file_name` | Remote file name | no |
+| Custom field `context_name` | Kubeconfig context name | no |
+| Custom field `identity_file` | SSH private key path | no |
+
+Example: an item named `k3s:prod-node` with `item_prefix = "k3s:"` becomes a server named `prod-node`.
+
+### Server merge
+
+Local `[[server]]` entries in `config.toml` take precedence over vault items with the same name. This lets you override vault-managed servers locally when needed. The vault is synced automatically at the start of each run.
+
+### TUI behavior
+
+- On startup, the TUI prompts for your master password if the vault is locked. Press **Esc** to skip and use local servers only.
+- Vault servers show a `[vault]` badge on the dashboard
+- Vault servers are read-only — delete (`D`) and credential management (`c`) are disabled; manage them in Bitwarden
+- The notification bar shows how many vault servers were loaded and flags any items that were skipped due to missing required fields
+
+---
+
+## Security
+
+### Credential storage
+
+| Method | Where | Security model |
+|---|---|---|
+| OS keyring (default) | GNOME Secret Service (Linux) / macOS Keychain | Encrypted by the desktop session |
+| File fallback | `~/.config/kube_config_updater/credentials` | `chmod 0600` — owner-read-only, base64-encoded (not encrypted) |
+| Bitwarden vault | Bitwarden/Vaultwarden server | End-to-end encrypted; decrypted locally by `bw` CLI |
+
+The file fallback uses the same security model as `~/.kube/config`, `~/.ssh/id_rsa`, and `~/.aws/credentials` — readable only by your Unix user. Root can always read any file.
+
+### Vault session handling
+
+- The Bitwarden session key is held **in memory only** — never written to disk by this tool
+- The `bw` CLI receives the session key via environment variable (`BW_SESSION`), not CLI argument — this avoids exposure in `ps` output
+- Master passwords are cleared from memory immediately after the `bw unlock` call
+- Vault passwords (SSH credentials from vault items) are held in a HashMap for the duration of the run, then dropped
+
+### Headless/cron authentication
+
+For unattended operation, the tool supports API key authentication:
+
+- `BW_CLIENTID` and `BW_CLIENTSECRET` environment variables provide login credentials (bypasses 2FA)
+- `password_file` in the `[bitwarden]` config section points to a `chmod 600` file containing the master password for vault unlock
+- The master password never appears in environment variables or CLI arguments
+
+The tool warns (like SSH does for private keys) if `password_file` has overly permissive file permissions.
+
+### Access control
+
+When Bitwarden is enabled, the tool sees **only servers the authenticated user has access to**. Access control is fully delegated to Bitwarden's organization and collection permissions — the tool does not implement authorization.
+
+---
+
 ## Cron usage
 
 The CLI is safe for cron — produces no output when all certs are valid.
 
 ```cron
 0 6 * * * /usr/local/bin/kube_config_updater --log-dir /var/log/kube_config_updater
+```
+
+### With Bitwarden vault
+
+For cron jobs that need vault access, create a wrapper script:
+
+```bash
+#!/bin/bash
+set -euo pipefail
+source /etc/kube-config-updater/bw-credentials   # exports BW_CLIENTID, BW_CLIENTSECRET
+/usr/local/bin/kube_config_updater --log-dir /var/log/kube_config_updater
+```
+
+The tool handles `bw login --apikey` and `bw unlock --passwordfile` internally when it detects the API key environment variables and a configured `password_file`.
+
+Setup:
+
+```bash
+# Store API credentials (from Bitwarden web vault → Settings → Security → Keys)
+cat > /etc/kube-config-updater/bw-credentials <<'EOF'
+export BW_CLIENTID=user.xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+export BW_CLIENTSECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxx
+EOF
+chmod 600 /etc/kube-config-updater/bw-credentials
+
+# Store master password
+echo "your-master-password" > /etc/kube-config-updater/bw-password
+chmod 600 /etc/kube-config-updater/bw-password
+```
+
+Then add `password_file` to your config:
+
+```toml
+[bitwarden]
+enabled = true
+server_url = "https://vault.strata.com"
+collection = "K3s Production"
+item_prefix = "k3s:"
+password_file = "/etc/kube-config-updater/bw-password"
 ```
 
 ---
@@ -260,6 +415,7 @@ The CLI is safe for cron — produces no output when all certs are valid.
 ```
 src/
 ├── main.rs           CLI entry point and command routing
+├── bitwarden.rs      Bitwarden/Vaultwarden CLI wrapper and vault item parsing
 ├── fetch.rs          Server processing loop (parallel, cert-skip logic)
 ├── config.rs         Config loading, server add/remove (comment-preserving)
 ├── credentials.rs    OS keyring + file fallback credential storage
@@ -274,6 +430,7 @@ src/
         ├── dashboard.rs   Server list, delete confirm, error overlay
         ├── detail.rs      Server detail, cert probe
         ├── wizard.rs      Add-server wizard, connection test
+        ├── bitwarden.rs   Vault unlock prompt (render + key handler)
         ├── credentials.rs     Credential set/delete UI
         ├── keyring_fallback.rs Consent dialog for file-based credential fallback
         └── help.rs            Help modal

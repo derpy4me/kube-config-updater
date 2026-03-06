@@ -2,14 +2,14 @@ use std::sync::mpsc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
+    Frame,
     layout::{Constraint, Layout},
     style::{Color, Style},
     widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
-    Frame,
 };
 
-use crate::tui::app::{AppEvent, AppState, SetupStep, SetupWizardState, View, WizardState};
 use super::centered_rect;
+use crate::tui::app::{AppEvent, AppState, SetupStep, SetupWizardState, View, WizardState};
 
 pub fn render(frame: &mut Frame, app: &AppState, wizard: &SetupWizardState) {
     let area = frame.area();
@@ -37,7 +37,7 @@ pub fn render(frame: &mut Frame, app: &AppState, wizard: &SetupWizardState) {
     ])
     .split(inner);
 
-    render_step_indicator(frame, wizard, rows[0]);
+    render_step_indicator(frame, wizard, rows[0], wizard.bitwarden_enabled);
 
     let sep = Paragraph::new("  ────────────────────────────────────────────────────────");
     frame.render_widget(sep, rows[1]);
@@ -50,34 +50,48 @@ pub fn render(frame: &mut Frame, app: &AppState, wizard: &SetupWizardState) {
         } else {
             Style::default()
         };
-        frame.render_widget(Paragraph::new(format!("  {}", err)).style(style).wrap(Wrap { trim: true }), rows[3]);
+        frame.render_widget(
+            Paragraph::new(format!("  {}", err))
+                .style(style)
+                .wrap(Wrap { trim: true }),
+            rows[3],
+        );
     }
 
     let hints = match wizard.step {
         SetupStep::OutputDir => "  Enter:next  Ctrl+C:quit  (required)",
+        SetupStep::BitwardenEnabled => "  y:enable  Enter/n:skip  Esc:back",
         _ => "  Enter:next  Esc:back  (leave blank for no default)",
     };
     frame.render_widget(Paragraph::new(hints), rows[4]);
 }
 
-fn render_step_indicator(frame: &mut Frame, wizard: &SetupWizardState, area: ratatui::layout::Rect) {
+fn render_step_indicator(
+    frame: &mut Frame,
+    wizard: &SetupWizardState,
+    area: ratatui::layout::Rect,
+    bitwarden_enabled: bool,
+) {
     let current_idx = wizard.step.index();
-    let total = 4usize;
+    // Show 7 steps if bitwarden is enabled, 5 if not (4 base + bitwarden y/n)
+    let total = if bitwarden_enabled { 7usize } else { 5usize };
 
     let label = format!("  Step {} of {} — {}   ", current_idx + 1, total, wizard.step.label());
 
     let dots: String = (0..total)
         .map(|i| {
-            if i < current_idx { '●' } else if i == current_idx { '◉' } else { '○' }
+            if i < current_idx {
+                '●'
+            } else if i == current_idx {
+                '◉'
+            } else {
+                '○'
+            }
         })
         .collect();
 
     let dots_len = dots.chars().count() as u16;
-    let cols = Layout::horizontal([
-        Constraint::Fill(1),
-        Constraint::Length(dots_len),
-    ])
-    .split(area);
+    let cols = Layout::horizontal([Constraint::Fill(1), Constraint::Length(dots_len)]).split(area);
 
     frame.render_widget(Paragraph::new(label), cols[0]);
     frame.render_widget(Paragraph::new(dots), cols[1]);
@@ -105,6 +119,21 @@ fn render_content(frame: &mut Frame, wizard: &SetupWizardState, area: ratatui::l
             wizard.default_file_name.as_str(),
             "Remote filename unless overridden  (k3s default: k3s.yaml)",
         ),
+        SetupStep::BitwardenEnabled => (
+            "Enable Bitwarden/Vaultwarden vault?",
+            if wizard.bitwarden_enabled { "y" } else { "n" },
+            "Pull server list and SSH passwords from your Bitwarden vault",
+        ),
+        SetupStep::BitwardenServerUrl => (
+            "Vault server URL",
+            wizard.bitwarden_server_url.as_str(),
+            "Self-hosted Vaultwarden URL  (leave blank to use bitwarden.com)",
+        ),
+        SetupStep::BitwardenItemPrefix => (
+            "Vault item prefix",
+            wizard.bitwarden_item_prefix.as_str(),
+            "Only items whose name starts with this prefix are imported  (e.g. k3s:)",
+        ),
     };
 
     let content_rows = Layout::vertical([
@@ -115,25 +144,15 @@ fn render_content(frame: &mut Frame, wizard: &SetupWizardState, area: ratatui::l
     ])
     .split(area);
 
-    frame.render_widget(
-        Paragraph::new(format!("  {}:", field_label)),
-        content_rows[0],
-    );
-    frame.render_widget(
-        Paragraph::new(format!("  > {}│", value)),
-        content_rows[1],
-    );
+    frame.render_widget(Paragraph::new(format!("  {}:", field_label)), content_rows[0]);
+    frame.render_widget(Paragraph::new(format!("  > {}│", value)), content_rows[1]);
     frame.render_widget(
         Paragraph::new(format!("  {}", hint)).wrap(Wrap { trim: true }),
         content_rows[3],
     );
 }
 
-pub fn handle_key(
-    app: &mut AppState,
-    key: KeyEvent,
-    _tx: &mpsc::Sender<AppEvent>,
-) -> bool {
+pub fn handle_key(app: &mut AppState, key: KeyEvent, _tx: &mpsc::Sender<AppEvent>) -> bool {
     let ws = match &app.view {
         View::SetupWizard(ws) => ws.clone(),
         _ => return false,
@@ -161,6 +180,9 @@ pub fn handle_key(
             if let Some(err) = validate(&ws) {
                 ws.error = Some(err);
                 app.view = View::SetupWizard(ws);
+            } else if ws.step == SetupStep::BitwardenEnabled && !ws.bitwarden_enabled {
+                // User chose not to enable Bitwarden — skip vault steps and finish
+                setup_write(app, &ws);
             } else if let Some(next) = ws.step.next() {
                 ws.error = None;
                 ws.step = next;
@@ -173,10 +195,25 @@ pub fn handle_key(
         KeyCode::Backspace => {
             let mut ws = ws;
             match ws.step {
-                SetupStep::OutputDir => { ws.output_dir.pop(); }
-                SetupStep::DefaultUser => { ws.default_user.pop(); }
-                SetupStep::DefaultFilePath => { ws.default_file_path.pop(); }
-                SetupStep::DefaultFileName => { ws.default_file_name.pop(); }
+                SetupStep::OutputDir => {
+                    ws.output_dir.pop();
+                }
+                SetupStep::DefaultUser => {
+                    ws.default_user.pop();
+                }
+                SetupStep::DefaultFilePath => {
+                    ws.default_file_path.pop();
+                }
+                SetupStep::DefaultFileName => {
+                    ws.default_file_name.pop();
+                }
+                SetupStep::BitwardenEnabled => {} // toggled by y/n, not text
+                SetupStep::BitwardenServerUrl => {
+                    ws.bitwarden_server_url.pop();
+                }
+                SetupStep::BitwardenItemPrefix => {
+                    ws.bitwarden_item_prefix.pop();
+                }
             };
             ws.error = None;
             app.view = View::SetupWizard(ws);
@@ -188,6 +225,13 @@ pub fn handle_key(
                 SetupStep::DefaultUser => ws.default_user.push(c),
                 SetupStep::DefaultFilePath => ws.default_file_path.push(c),
                 SetupStep::DefaultFileName => ws.default_file_name.push(c),
+                SetupStep::BitwardenEnabled => match c {
+                    'y' | 'Y' => ws.bitwarden_enabled = true,
+                    'n' | 'N' => ws.bitwarden_enabled = false,
+                    _ => {}
+                },
+                SetupStep::BitwardenServerUrl => ws.bitwarden_server_url.push(c),
+                SetupStep::BitwardenItemPrefix => ws.bitwarden_item_prefix.push(c),
             }
             ws.error = None;
             app.view = View::SetupWizard(ws);
@@ -215,10 +259,31 @@ fn build_config_toml(ws: &SetupWizardState) -> String {
         toml.push_str(&format!("default_user = \"{}\"\n", toml_escape(ws.default_user.trim())));
     }
     if !ws.default_file_path.trim().is_empty() {
-        toml.push_str(&format!("default_file_path = \"{}\"\n", toml_escape(ws.default_file_path.trim())));
+        toml.push_str(&format!(
+            "default_file_path = \"{}\"\n",
+            toml_escape(ws.default_file_path.trim())
+        ));
     }
     if !ws.default_file_name.trim().is_empty() {
-        toml.push_str(&format!("default_file_name = \"{}\"\n", toml_escape(ws.default_file_name.trim())));
+        toml.push_str(&format!(
+            "default_file_name = \"{}\"\n",
+            toml_escape(ws.default_file_name.trim())
+        ));
+    }
+    if ws.bitwarden_enabled {
+        toml.push_str("\n[bitwarden]\nenabled = true\n");
+        if !ws.bitwarden_server_url.trim().is_empty() {
+            toml.push_str(&format!(
+                "server_url = \"{}\"\n",
+                toml_escape(ws.bitwarden_server_url.trim())
+            ));
+        }
+        let prefix = if ws.bitwarden_item_prefix.trim().is_empty() {
+            "k3s:"
+        } else {
+            ws.bitwarden_item_prefix.trim()
+        };
+        toml.push_str(&format!("item_prefix = \"{}\"\n", toml_escape(prefix)));
     }
     toml
 }
@@ -258,7 +323,13 @@ mod tests {
         assert_eq!(SetupStep::OutputDir.next(), Some(SetupStep::DefaultUser));
         assert_eq!(SetupStep::DefaultUser.next(), Some(SetupStep::DefaultFilePath));
         assert_eq!(SetupStep::DefaultFilePath.next(), Some(SetupStep::DefaultFileName));
-        assert_eq!(SetupStep::DefaultFileName.next(), None);
+        assert_eq!(SetupStep::DefaultFileName.next(), Some(SetupStep::BitwardenEnabled));
+        assert_eq!(SetupStep::BitwardenEnabled.next(), Some(SetupStep::BitwardenServerUrl));
+        assert_eq!(
+            SetupStep::BitwardenServerUrl.next(),
+            Some(SetupStep::BitwardenItemPrefix)
+        );
+        assert_eq!(SetupStep::BitwardenItemPrefix.next(), None);
     }
 
     #[test]
@@ -267,6 +338,12 @@ mod tests {
         assert_eq!(SetupStep::DefaultUser.prev(), Some(SetupStep::OutputDir));
         assert_eq!(SetupStep::DefaultFilePath.prev(), Some(SetupStep::DefaultUser));
         assert_eq!(SetupStep::DefaultFileName.prev(), Some(SetupStep::DefaultFilePath));
+        assert_eq!(SetupStep::BitwardenEnabled.prev(), Some(SetupStep::DefaultFileName));
+        assert_eq!(SetupStep::BitwardenServerUrl.prev(), Some(SetupStep::BitwardenEnabled));
+        assert_eq!(
+            SetupStep::BitwardenItemPrefix.prev(),
+            Some(SetupStep::BitwardenServerUrl)
+        );
     }
 
     #[test]
@@ -275,6 +352,9 @@ mod tests {
         assert_eq!(SetupStep::DefaultUser.index(), 1);
         assert_eq!(SetupStep::DefaultFilePath.index(), 2);
         assert_eq!(SetupStep::DefaultFileName.index(), 3);
+        assert_eq!(SetupStep::BitwardenEnabled.index(), 4);
+        assert_eq!(SetupStep::BitwardenServerUrl.index(), 5);
+        assert_eq!(SetupStep::BitwardenItemPrefix.index(), 6);
     }
 
     // ── Validation ────────────────────────────────────────────────────────────
@@ -287,13 +367,19 @@ mod tests {
 
     #[test]
     fn test_validate_rejects_whitespace_only_output_dir() {
-        let ws = SetupWizardState { output_dir: "   ".to_string(), ..Default::default() };
+        let ws = SetupWizardState {
+            output_dir: "   ".to_string(),
+            ..Default::default()
+        };
         assert!(validate(&ws).is_some());
     }
 
     #[test]
     fn test_validate_accepts_non_empty_output_dir() {
-        let ws = SetupWizardState { output_dir: "/home/user/.kube".to_string(), ..Default::default() };
+        let ws = SetupWizardState {
+            output_dir: "/home/user/.kube".to_string(),
+            ..Default::default()
+        };
         assert!(validate(&ws).is_none());
     }
 
@@ -304,7 +390,14 @@ mod tests {
             ..Default::default()
         };
 
-        for step in [SetupStep::DefaultUser, SetupStep::DefaultFilePath, SetupStep::DefaultFileName] {
+        for step in [
+            SetupStep::DefaultUser,
+            SetupStep::DefaultFilePath,
+            SetupStep::DefaultFileName,
+            SetupStep::BitwardenEnabled,
+            SetupStep::BitwardenServerUrl,
+            SetupStep::BitwardenItemPrefix,
+        ] {
             let ws = SetupWizardState { step, ..base.clone() };
             assert!(validate(&ws).is_none(), "blank optional step should pass validation");
         }
@@ -323,6 +416,51 @@ mod tests {
         assert!(!toml.contains("default_user"));
         assert!(!toml.contains("default_file_path"));
         assert!(!toml.contains("default_file_name"));
+        assert!(!toml.contains("[bitwarden]"));
+    }
+
+    #[test]
+    fn test_build_config_toml_bitwarden_enabled_defaults() {
+        let ws = SetupWizardState {
+            output_dir: "/home/user/.kube".to_string(),
+            bitwarden_enabled: true,
+            // server_url blank → omitted; item_prefix blank → defaults to "k3s:"
+            ..Default::default()
+        };
+        let toml = build_config_toml(&ws);
+        assert!(toml.contains("[bitwarden]"));
+        assert!(toml.contains("enabled = true"));
+        assert!(toml.contains("item_prefix = \"k3s:\""));
+        assert!(!toml.contains("server_url"));
+    }
+
+    #[test]
+    fn test_build_config_toml_bitwarden_with_server_url_and_prefix() {
+        let ws = SetupWizardState {
+            output_dir: "/home/user/.kube".to_string(),
+            bitwarden_enabled: true,
+            bitwarden_server_url: "https://vault.example.com".to_string(),
+            bitwarden_item_prefix: "myprefix:".to_string(),
+            ..Default::default()
+        };
+        let toml = build_config_toml(&ws);
+        assert!(toml.contains("server_url = \"https://vault.example.com\""));
+        assert!(toml.contains("item_prefix = \"myprefix:\""));
+    }
+
+    #[test]
+    fn test_build_config_toml_bitwarden_disabled_omitted() {
+        let ws = SetupWizardState {
+            output_dir: "/home/user/.kube".to_string(),
+            bitwarden_enabled: false,
+            bitwarden_server_url: "https://vault.example.com".to_string(),
+            ..Default::default()
+        };
+        let toml = build_config_toml(&ws);
+        assert!(
+            !toml.contains("[bitwarden]"),
+            "disabled bitwarden must not appear in config"
+        );
     }
 
     #[test]
@@ -378,8 +516,8 @@ mod tests {
         };
         let tmp = NamedTempFile::new().expect("temp file");
         std::fs::write(tmp.path(), build_config_toml(&ws)).expect("write");
-        let config = crate::config::load_config(tmp.path().to_str().unwrap())
-            .expect("path with quotes must survive round-trip");
+        let config =
+            crate::config::load_config(tmp.path().to_str().unwrap()).expect("path with quotes must survive round-trip");
         assert_eq!(config.local_output_dir, r#"/home/user/my "special" dir"#);
     }
 
@@ -412,8 +550,8 @@ mod tests {
         let tmp = NamedTempFile::new().expect("temp file");
         std::fs::write(tmp.path(), build_config_toml(&ws)).expect("write");
 
-        let config = crate::config::load_config(tmp.path().to_str().unwrap())
-            .expect("setup wizard TOML should parse cleanly");
+        let config =
+            crate::config::load_config(tmp.path().to_str().unwrap()).expect("setup wizard TOML should parse cleanly");
 
         assert_eq!(config.local_output_dir, "/tmp/kube");
         assert_eq!(config.default_user.as_deref(), Some("ubuntu"));
@@ -434,8 +572,7 @@ mod tests {
         let tmp = NamedTempFile::new().expect("temp file");
         std::fs::write(tmp.path(), build_config_toml(&ws)).expect("write");
 
-        let config = crate::config::load_config(tmp.path().to_str().unwrap())
-            .expect("minimal setup TOML must parse");
+        let config = crate::config::load_config(tmp.path().to_str().unwrap()).expect("minimal setup TOML must parse");
 
         assert_eq!(config.local_output_dir, "/tmp/kube");
         assert!(config.default_user.is_none());
