@@ -10,6 +10,7 @@ use ratatui::{
 };
 
 use super::{centered_rect, cert_color, cert_expires_display, status_color, status_display};
+use crate::state::RunStatus;
 use crate::tui::app::{AppEvent, AppState, View, WizardState};
 
 pub fn render(frame: &mut Frame, app: &mut AppState) {
@@ -82,8 +83,19 @@ fn render_server_table(frame: &mut Frame, app: &mut AppState, area: ratatui::lay
                 )
             } else {
                 let text = match state {
-                    Some(s) => status_display(&s.status).to_string(),
-                    None => "· Not run today".to_string(),
+                    Some(s) => {
+                        let base = status_display(&s.status);
+                        if s.status == RunStatus::Fetched {
+                            if let Some(t) = s.last_updated {
+                                format!("{} {}", base, relative_age(&t))
+                            } else {
+                                base.to_string()
+                            }
+                        } else {
+                            base.to_string()
+                        }
+                    }
+                    None => "· Not run yet".to_string(),
                 };
                 let style = match state {
                     Some(s) => status_color(&s.status, app.use_color),
@@ -363,6 +375,19 @@ fn perform_delete(app: &mut AppState, server_name: &str) {
 
     app.notification = Some((format!("Deleted server: {}", server_name), std::time::Instant::now()));
     app.view = View::Dashboard;
+}
+
+fn relative_age(dt: &chrono::DateTime<chrono::Utc>) -> String {
+    let secs = (chrono::Utc::now() - *dt).num_seconds().max(0);
+    if secs < 3600 {
+        "just now".to_string()
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else if secs < 7 * 86_400 {
+        format!("{}d ago", secs / 86_400)
+    } else {
+        format!("{}w ago", secs / (7 * 86_400))
+    }
 }
 
 fn open_editor(terminal: &mut ratatui::DefaultTerminal, app: &mut AppState) {
