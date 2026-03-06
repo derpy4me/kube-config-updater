@@ -37,13 +37,23 @@ pub fn run_tui(config: Config, config_path: std::path::PathBuf, dry_run: bool) -
                     // Session acquired — fetch vault servers
                     let prefix = bw_config.item_prefix.as_deref().unwrap_or("k3s:");
                     match bw_cli.fetch_servers(prefix, bw_config.collection.as_deref()) {
-                        Ok(vault_servers) => {
+                        Ok((vault_servers, skipped)) => {
                             let (merged, sources, passwords) =
                                 crate::bitwarden::merge_servers(&app.config.servers, vault_servers);
                             app.config.servers = merged;
                             app.server_sources = sources;
                             app.vault_passwords = passwords;
                             app.refresh_cert_cache();
+                            if !skipped.is_empty() {
+                                app.notification = Some((
+                                    format!(
+                                        "{} vault item(s) skipped (missing fields: {})",
+                                        skipped.len(),
+                                        skipped.join("; ")
+                                    ),
+                                    std::time::Instant::now(),
+                                ));
+                            }
                         }
                         Err(e) => {
                             app.notification = Some((format!("Vault fetch failed: {}", e), std::time::Instant::now()));

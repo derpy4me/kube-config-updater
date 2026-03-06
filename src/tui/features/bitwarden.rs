@@ -107,7 +107,7 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent, tx: &std::sync::mpsc::Sende
 fn do_bitwarden_unlock(
     password: &str,
     bw_config: Option<&crate::bitwarden::BitwardenConfig>,
-) -> Result<Vec<crate::bitwarden::VaultServer>, String> {
+) -> Result<(Vec<crate::bitwarden::VaultServer>, Vec<String>), String> {
     let bw_config = bw_config.ok_or("Bitwarden not configured")?;
     let mut cli = crate::bitwarden::BwCli::new().with_server_url(bw_config.server_url.as_deref());
 
@@ -118,11 +118,11 @@ fn do_bitwarden_unlock(
 }
 
 /// Called by the event loop when BitwardenComplete arrives.
-pub fn on_complete(app: &mut AppState, result: Result<Vec<crate::bitwarden::VaultServer>, String>) {
+pub fn on_complete(app: &mut AppState, result: Result<(Vec<crate::bitwarden::VaultServer>, Vec<String>), String>) {
     app.in_progress.remove("__bitwarden__");
 
     match result {
-        Ok(vault_servers) => {
+        Ok((vault_servers, skipped)) => {
             let (merged, sources, passwords) = crate::bitwarden::merge_servers(&app.config.servers, vault_servers);
             app.config.servers = merged;
             app.server_sources = sources;
@@ -136,10 +136,17 @@ pub fn on_complete(app: &mut AppState, result: Result<Vec<crate::bitwarden::Vaul
                 .values()
                 .filter(|s| **s == crate::bitwarden::ServerSource::Vault)
                 .count();
-            app.notification = Some((
-                format!("Vault unlocked — {} server(s) loaded", vault_count),
-                std::time::Instant::now(),
-            ));
+            let msg = if skipped.is_empty() {
+                format!("Vault unlocked — {} server(s) loaded", vault_count)
+            } else {
+                format!(
+                    "Vault unlocked — {} server(s) loaded, {} skipped (missing fields: {})",
+                    vault_count,
+                    skipped.len(),
+                    skipped.join("; ")
+                )
+            };
+            app.notification = Some((msg, std::time::Instant::now()));
             app.view = View::Dashboard;
         }
         Err(msg) => {

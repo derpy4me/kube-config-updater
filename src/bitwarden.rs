@@ -281,14 +281,28 @@ impl BwCli {
         }
     }
 
-    /// Fetch vault items matching prefix, optionally filtered by collection.
-    /// Skips items that fail to parse (logs warning).
-    pub fn fetch_servers(&self, prefix: &str, collection: Option<&str>) -> Result<Vec<VaultServer>, String> {
+    /// Fetch vault items matching prefix, optionally filtered by collection name or ID.
+    /// Syncs the vault first to ensure items are current.
+    /// Returns (servers, skipped_errors) so callers can surface parse failures to the user.
+    pub fn fetch_servers(
+        &self,
+        prefix: &str,
+        collection: Option<&str>,
+    ) -> Result<(Vec<VaultServer>, Vec<String>), String> {
+        // Sync first so newly-created items are visible
+        self.run(&["sync"])?;
+
         let mut args = vec!["list", "items", "--search", prefix];
-        let collection_owned;
+        let collection_id_owned;
         if let Some(c) = collection {
-            collection_owned = c.to_string();
-            args.extend(["--collectionid", &collection_owned]);
+            // Resolve name → UUID if the value doesn't already look like a UUID
+            let id = if is_uuid(c) {
+                c.to_string()
+            } else {
+                self.resolve_collection_id(c)?
+            };
+            collection_id_owned = id;
+            args.extend(["--collectionid", &collection_id_owned]);
         }
 
         let output = self.run(&args)?;
@@ -296,14 +310,18 @@ impl BwCli {
             serde_json::from_str(&output).map_err(|e| format!("Failed to parse vault items: {}", e))?;
 
         let mut servers = Vec::new();
+        let mut skipped = Vec::new();
         for item in &items {
             match item.to_vault_server(prefix) {
                 Ok(vs) => servers.push(vs),
-                Err(e) => log::warn!("Skipping vault item '{}': {}", item.name, e),
+                Err(e) => {
+                    log::warn!("Skipping vault item '{}': {}", item.name, e);
+                    skipped.push(format!("'{}': {}", item.name, e));
+                }
             }
         }
 
-        Ok(servers)
+        Ok((servers, skipped))
     }
 
     /// Run a bw command with session key via env var (not --session arg).
@@ -329,6 +347,32 @@ impl BwCli {
             })
         }
     }
+
+    /// Resolve a collection name to its UUID by calling `bw list collections`.
+    fn resolve_collection_id(&self, name: &str) -> Result<String, String> {
+        let output = self.run(&["list", "collections"])?;
+        let collections: Vec<BwCollection> =
+            serde_json::from_str(&output).map_err(|e| format!("Failed to parse collections: {}", e))?;
+        collections
+            .into_iter()
+            .find(|c| c.name == name)
+            .map(|c| c.id)
+            .ok_or_else(|| format!("No Bitwarden collection named '{}'", name))
+    }
+}
+
+/// Returns true if the string looks like a UUID (8-4-4-4-12 hex).
+fn is_uuid(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('-').collect();
+    matches!(parts.as_slice(), [a, b, c, d, e]
+        if a.len() == 8 && b.len() == 4 && c.len() == 4 && d.len() == 4 && e.len() == 12
+        && s.chars().all(|ch| ch.is_ascii_hexdigit() || ch == '-'))
+}
+
+#[derive(Deserialize)]
+struct BwCollection {
+    id: String,
+    name: String,
 }
 
 /// Check that a password file has restrictive permissions (0600).

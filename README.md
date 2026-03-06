@@ -249,26 +249,55 @@ Status values: `Fetched` · `Skipped` · `NoCredential` · `AuthRejected` · `Fa
 
 Server configs and SSH credentials can optionally be sourced from a Bitwarden or Vaultwarden vault. This enables company-managed access control — admins define which servers each team member can access via Bitwarden organizations and collections.
 
-**This is additive** — the existing keyring + file fallback system remains the default. Vault integration is enabled by adding a `[bitwarden]` section to `config.toml`.
+**This is additive** — the existing keyring + file fallback system remains the default.
 
-### Setup
+### Prerequisites
 
-1. Install the Bitwarden CLI: `npm install -g @bitwarden/cli`
-2. Configure it for your server: `bw config server https://vault.your-company.com`
-3. Log in: `bw login`
-4. Add the `[bitwarden]` section to your config:
+Before enabling vault integration, do this once in your terminal:
+
+```bash
+# 1. Install the Bitwarden CLI
+npm install -g @bitwarden/cli
+
+# 2. (Self-hosted only) Point bw at your Vaultwarden instance
+bw config server https://vault.your-company.com
+
+# 3. Log in to your vault
+bw login
+```
+
+You do not need to unlock the vault manually — the TUI and CLI handle that.
+
+### Setup via TUI (recommended)
+
+When you launch `kube_config_updater tui` for the first time (no config file), the setup wizard runs automatically. Step 5 asks:
+
+```
+Step 5 of 5 — Bitwarden vault integration
+  Enable Bitwarden/Vaultwarden vault? [n]
+  ────────────────────────────────────────
+  Pull server list and SSH passwords from your Bitwarden vault
+
+  y:enable  Enter/n:skip  Esc:back
+```
+
+Press **y**, then fill in the server URL (blank for bitwarden.com) and item prefix.
+
+### Manual config
+
+Add a `[bitwarden]` section to `~/.kube_config_updater/config.toml`:
 
 ```toml
 [bitwarden]
 enabled = true
-server_url = "https://vault.strata.com"
-collection = "K3s Production"
-item_prefix = "k3s:"
+server_url = "https://vault.your-company.com"  # omit for bitwarden.com
+collection = "K3s Production"                  # collection name or UUID; omit for all items
+item_prefix = "k3s:"                           # only items whose name starts with this are imported
 ```
 
 ### Vault item format
 
-Each server is a **Login item** in the configured collection:
+Each server is a **Login item** in your vault:
 
 | Bitwarden field | Maps to | Required |
 |---|---|---|
@@ -282,15 +311,18 @@ Each server is a **Login item** in the configured collection:
 | Custom field `context_name` | Kubeconfig context name | no |
 | Custom field `identity_file` | SSH private key path | no |
 
+Example: an item named `k3s:prod-node` with `item_prefix = "k3s:"` becomes a server named `prod-node`.
+
 ### Server merge
 
-Local `[[server]]` entries in config.toml take precedence over vault items with the same name. This lets you override vault-managed servers locally when needed.
+Local `[[server]]` entries in `config.toml` take precedence over vault items with the same name. This lets you override vault-managed servers locally when needed. The vault is synced automatically at the start of each run.
 
 ### TUI behavior
 
+- On startup, the TUI prompts for your master password if the vault is locked. Press **Esc** to skip and use local servers only.
 - Vault servers show a `[vault]` badge on the dashboard
-- Vault servers are read-only — delete and credential management are disabled (managed in Bitwarden)
-- The credential column shows "Vault" for vault-sourced servers
+- Vault servers are read-only — delete (`D`) and credential management (`c`) are disabled; manage them in Bitwarden
+- The notification bar shows how many vault servers were loaded and flags any items that were skipped due to missing required fields
 
 ---
 

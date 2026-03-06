@@ -222,13 +222,16 @@ fn main() -> Result<(), anyhow::Error> {
                         .map_err(|e| anyhow::anyhow!("Bitwarden: {}", e))?;
 
                     let prefix = bw_config.item_prefix.as_deref().unwrap_or("k3s:");
-                    let vault_servers = bw_cli
+                    let (vault_servers, skipped) = bw_cli
                         .fetch_servers(prefix, bw_config.collection.as_deref())
                         .map_err(|e| anyhow::anyhow!("Bitwarden fetch: {}", e))?;
 
+                    for s in &skipped {
+                        log::warn!("Vault item skipped: {}", s);
+                    }
                     let (merged, _sources, passwords) = bitwarden::merge_servers(&config.servers, vault_servers);
                     config.servers = merged;
-                    log::info!("Loaded {} vault servers", passwords.len());
+                    log::info!("Loaded {} vault server(s), {} skipped", passwords.len(), skipped.len());
                     passwords
                 } else {
                     std::collections::HashMap::new()

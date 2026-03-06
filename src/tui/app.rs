@@ -29,7 +29,7 @@ pub enum AppEvent {
     },
     StateFileChanged,
     BitwardenComplete {
-        result: Result<Vec<crate::bitwarden::VaultServer>, String>,
+        result: Result<(Vec<crate::bitwarden::VaultServer>, Vec<String>), String>,
     },
 }
 
@@ -78,6 +78,10 @@ pub struct SetupWizardState {
     pub default_user: String,
     pub default_file_path: String,
     pub default_file_name: String,
+    // Bitwarden steps (shown after DefaultFileName)
+    pub bitwarden_enabled: bool,
+    pub bitwarden_server_url: String,
+    pub bitwarden_item_prefix: String,
     pub error: Option<String>,
 }
 
@@ -88,6 +92,12 @@ pub enum SetupStep {
     DefaultUser,
     DefaultFilePath,
     DefaultFileName,
+    /// "Enable Bitwarden vault integration? [y/N]"
+    BitwardenEnabled,
+    /// Vault server URL (blank = bitwarden.com / self-hosted otherwise)
+    BitwardenServerUrl,
+    /// Item name prefix used to identify k8s servers in the vault
+    BitwardenItemPrefix,
 }
 
 impl SetupStep {
@@ -97,6 +107,9 @@ impl SetupStep {
             SetupStep::DefaultUser => 1,
             SetupStep::DefaultFilePath => 2,
             SetupStep::DefaultFileName => 3,
+            SetupStep::BitwardenEnabled => 4,
+            SetupStep::BitwardenServerUrl => 5,
+            SetupStep::BitwardenItemPrefix => 6,
         }
     }
 
@@ -106,15 +119,23 @@ impl SetupStep {
             SetupStep::DefaultUser => "Default SSH user",
             SetupStep::DefaultFilePath => "Default remote file path",
             SetupStep::DefaultFileName => "Default remote file name",
+            SetupStep::BitwardenEnabled => "Bitwarden vault integration",
+            SetupStep::BitwardenServerUrl => "Vault server URL",
+            SetupStep::BitwardenItemPrefix => "Vault item prefix",
         }
     }
 
+    /// Step after this one. Bitwarden URL/prefix steps are only reached
+    /// if bitwarden_enabled; callers handle the conditional skip themselves.
     pub fn next(&self) -> Option<SetupStep> {
         match self {
             SetupStep::OutputDir => Some(SetupStep::DefaultUser),
             SetupStep::DefaultUser => Some(SetupStep::DefaultFilePath),
             SetupStep::DefaultFilePath => Some(SetupStep::DefaultFileName),
-            SetupStep::DefaultFileName => None,
+            SetupStep::DefaultFileName => Some(SetupStep::BitwardenEnabled),
+            SetupStep::BitwardenEnabled => Some(SetupStep::BitwardenServerUrl),
+            SetupStep::BitwardenServerUrl => Some(SetupStep::BitwardenItemPrefix),
+            SetupStep::BitwardenItemPrefix => None,
         }
     }
 
@@ -124,6 +145,9 @@ impl SetupStep {
             SetupStep::DefaultUser => Some(SetupStep::OutputDir),
             SetupStep::DefaultFilePath => Some(SetupStep::DefaultUser),
             SetupStep::DefaultFileName => Some(SetupStep::DefaultFilePath),
+            SetupStep::BitwardenEnabled => Some(SetupStep::DefaultFileName),
+            SetupStep::BitwardenServerUrl => Some(SetupStep::BitwardenEnabled),
+            SetupStep::BitwardenItemPrefix => Some(SetupStep::BitwardenServerUrl),
         }
     }
 }
