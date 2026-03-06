@@ -251,13 +251,35 @@ pub fn render(frame: &mut Frame, app: &mut AppState, server_name: &str) {
     let content = Paragraph::new(lines);
     frame.render_widget(content, inner_chunks[0]);
 
-    let footer = Paragraph::new(Line::from(vec![Span::raw(
-        "  f:force-fetch  p:probe  c:cred  Esc:back  ?:help",
-    )]));
+    let is_vault = app
+        .server_sources
+        .get(server_name)
+        .copied()
+        .unwrap_or(crate::bitwarden::ServerSource::Local)
+        == crate::bitwarden::ServerSource::Vault;
+    let footer_text = if is_vault {
+        "  f:force-fetch  p:probe  Esc:back  ?:help"
+    } else {
+        "  f:force-fetch  p:probe  c:cred  e:edit config  Esc:back  ?:help"
+    };
+    let footer = Paragraph::new(Line::from(vec![Span::raw(footer_text)]));
     frame.render_widget(footer, inner_chunks[1]);
 }
 
-pub fn handle_key(app: &mut AppState, name: String, key: KeyEvent, tx: &mpsc::Sender<AppEvent>) -> bool {
+pub fn handle_key(
+    app: &mut AppState,
+    name: String,
+    key: KeyEvent,
+    tx: &mpsc::Sender<AppEvent>,
+    terminal: &mut ratatui::DefaultTerminal,
+) -> bool {
+    let is_vault = app
+        .server_sources
+        .get(&name)
+        .copied()
+        .unwrap_or(crate::bitwarden::ServerSource::Local)
+        == crate::bitwarden::ServerSource::Vault;
+
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
             app.probe = None;
@@ -282,16 +304,21 @@ pub fn handle_key(app: &mut AppState, name: String, key: KeyEvent, tx: &mpsc::Se
             }
         }
         KeyCode::Char('c') => {
-            let source = app
-                .server_sources
-                .get(&name)
-                .copied()
-                .unwrap_or(crate::bitwarden::ServerSource::Local);
-            if source == crate::bitwarden::ServerSource::Vault {
+            if is_vault {
                 app.notification = Some(("Credentials managed by vault".to_string(), std::time::Instant::now()));
                 return false;
             }
             app.view = View::CredentialMenu(name);
+        }
+        KeyCode::Char('e') => {
+            if is_vault {
+                app.notification = Some((
+                    "Vault servers are managed in Bitwarden".to_string(),
+                    std::time::Instant::now(),
+                ));
+                return false;
+            }
+            super::dashboard::open_editor(terminal, app);
         }
         KeyCode::Char('?') => {
             app.prior_view = Some(Box::new(View::Detail(name)));

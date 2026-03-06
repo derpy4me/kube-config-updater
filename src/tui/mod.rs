@@ -439,7 +439,7 @@ fn handle_key(
 
     match &app.view {
         View::Dashboard => features::dashboard::handle_key(app, key, tx, terminal),
-        View::Detail(name) => features::detail::handle_key(app, name.clone(), key, tx),
+        View::Detail(name) => features::detail::handle_key(app, name.clone(), key, tx, terminal),
         View::DeleteConfirm(name) => features::dashboard::handle_key_delete_confirm(app, name.clone(), key),
         View::Help => {
             features::help::handle_key(app, key);

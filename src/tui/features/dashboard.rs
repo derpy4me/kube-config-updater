@@ -365,7 +365,7 @@ fn perform_delete(app: &mut AppState, server_name: &str) {
     app.view = View::Dashboard;
 }
 
-fn open_editor(terminal: &mut ratatui::DefaultTerminal, app: &mut AppState) {
+pub(super) fn open_editor(terminal: &mut ratatui::DefaultTerminal, app: &mut AppState) {
     ratatui::restore();
 
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
