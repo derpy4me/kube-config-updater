@@ -13,6 +13,7 @@ pub fn run_tui(config: Config, config_path: std::path::PathBuf, dry_run: bool) -
     let server_states = state::read_state().unwrap_or_default();
     let mut app = AppState::new(config, config_path, server_states, dry_run);
     app.refresh_cert_cache();
+    app.refresh_cred_cache();
     // Bitwarden vault integration
     if let Some(ref bw_config) = app.config.bitwarden.clone()
         && bw_config.enabled
@@ -44,6 +45,7 @@ pub fn run_tui(config: Config, config_path: std::path::PathBuf, dry_run: bool) -
                             app.server_sources = sources;
                             app.vault_passwords = passwords;
                             app.refresh_cert_cache();
+                            app.refresh_cred_cache();
                             if !skipped.is_empty() {
                                 app.notification = Some((
                                     format!(

@@ -111,6 +111,7 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> bool {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
             match crate::credentials::set_credential_file(&server_name, &password) {
                 Ok(()) => {
+                    app.cred_cache.insert(server_name.clone(), true);
                     app.notification = Some((
                         format!("Credential for '{}' stored in file (0600)", server_name),
                         std::time::Instant::now(),

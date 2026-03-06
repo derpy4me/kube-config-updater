@@ -73,6 +73,7 @@ pub fn handle_key_menu(app: &mut AppState, name: String, key: KeyEvent) -> bool 
         KeyCode::Char('d') | KeyCode::Char('D') => {
             match crate::credentials::delete_credential(&name) {
                 Ok(()) => {
+                    app.cred_cache.insert(name.clone(), false);
                     app.notification = Some((format!("Credential deleted for '{}'", name), std::time::Instant::now()));
                 }
                 Err(e) => {
@@ -104,6 +105,7 @@ pub fn handle_key_input(app: &mut AppState, name: String, key: KeyEvent) -> bool
             app.credential_input.clear();
             match crate::credentials::set_credential(&name, &password) {
                 Ok(()) => {
+                    app.cred_cache.insert(name.clone(), true);
                     app.notification = Some((format!("Credential saved for '{}'", name), std::time::Instant::now()));
                     app.view = View::Dashboard;
                 }

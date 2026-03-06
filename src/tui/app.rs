@@ -364,6 +364,7 @@ pub struct AppState {
     pub config_path: PathBuf,
     pub server_states: HashMap<String, ServerRunState>,
     pub cert_cache: HashMap<String, Option<chrono::DateTime<chrono::Utc>>>,
+    pub cred_cache: HashMap<String, bool>,
     pub in_progress: HashSet<String>,
     pub view: View,
     pub prior_view: Option<Box<View>>, // saved when entering Help
@@ -400,6 +401,7 @@ impl AppState {
             config_path,
             server_states,
             cert_cache: HashMap::new(),
+            cred_cache: HashMap::new(),
             in_progress: HashSet::new(),
             view: View::Dashboard,
             prior_view: None,
@@ -430,6 +432,18 @@ impl AppState {
                 _ => None,
             };
             self.cert_cache.insert(server.name.clone(), expiry);
+        }
+    }
+
+    /// Checks whether a credential is stored for each server and caches the result.
+    /// Avoids repeated keyring/D-Bus/process calls on every render frame.
+    pub fn refresh_cred_cache(&mut self) {
+        for server in &self.config.servers {
+            let stored = matches!(
+                crate::credentials::get_credential(&server.name),
+                crate::credentials::CredentialResult::Found(_)
+            );
+            self.cred_cache.insert(server.name.clone(), stored);
         }
     }
 }

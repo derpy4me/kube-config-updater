@@ -24,3 +24,4 @@ kube_config.toml
 .logs
 .env
 claudedocs/
+.gitnexus

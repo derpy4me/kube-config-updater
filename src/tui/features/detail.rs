@@ -10,7 +10,6 @@ use ratatui::{
 };
 
 use super::{cert_color, cert_expires_display, status_color, status_display};
-use crate::credentials::CredentialResult;
 use crate::tui::app::{AppEvent, AppState, EditServerState, ProbeState, View};
 
 pub fn render(frame: &mut Frame, app: &mut AppState, server_name: &str) {
@@ -56,10 +55,8 @@ pub fn render(frame: &mut Frame, app: &mut AppState, server_name: &str) {
 
     let context_name = server.context_name.as_deref().unwrap_or("—").to_string();
 
-    // Credential status
-    let binding = [server_name];
-    let cred_results = crate::credentials::check_credentials(&binding);
-    let cred_stored = matches!(cred_results.first(), Some((_, CredentialResult::Found(_))));
+    // Credential status — read from cache populated at startup and after credential changes
+    let cred_stored = app.cred_cache.get(server_name).copied().unwrap_or(false);
     let cred_text = if cred_stored { "Stored" } else { "Not stored" };
     let cred_style = if !cred_stored && use_color {
         Style::default().fg(Color::Yellow)
