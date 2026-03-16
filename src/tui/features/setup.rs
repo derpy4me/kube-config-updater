@@ -60,7 +60,7 @@ pub fn render(frame: &mut Frame, app: &AppState, wizard: &SetupWizardState) {
 
     let hints = match wizard.step {
         SetupStep::OutputDir => "  Enter:next  Ctrl+C:quit  (required)",
-        SetupStep::BitwardenEnabled => "  y:enable  Enter/n:skip  Esc:back",
+        SetupStep::BitwardenEnabled => "  y:enable  n:skip  Esc:back  (required)",
         _ => "  Enter:next  Esc:back  (leave blank for no default)",
     };
     frame.render_widget(Paragraph::new(hints), rows[4]);
@@ -121,7 +121,7 @@ fn render_content(frame: &mut Frame, wizard: &SetupWizardState, area: ratatui::l
         ),
         SetupStep::BitwardenEnabled => (
             "Enable Bitwarden/Vaultwarden vault?",
-            if wizard.bitwarden_enabled { "y" } else { "n" },
+            if wizard.bitwarden_enabled { "y" } else { "?" },
             "Pull server list and SSH passwords from your Bitwarden vault",
         ),
         SetupStep::BitwardenServerUrl => (
@@ -177,12 +177,13 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent, _tx: &mpsc::Sender<AppEvent
         }
         KeyCode::Enter => {
             let mut ws = ws;
-            if let Some(err) = validate(&ws) {
+            if ws.step == SetupStep::BitwardenEnabled {
+                // Require explicit y/n — Enter does nothing here
+                ws.error = Some("Press y to enable or n to skip Bitwarden".to_string());
+                app.view = View::SetupWizard(ws);
+            } else if let Some(err) = validate(&ws) {
                 ws.error = Some(err);
                 app.view = View::SetupWizard(ws);
-            } else if ws.step == SetupStep::BitwardenEnabled && !ws.bitwarden_enabled {
-                // User chose not to enable Bitwarden — skip vault steps and finish
-                setup_write(app, &ws);
             } else if let Some(next) = ws.step.next() {
                 ws.error = None;
                 ws.step = next;
@@ -226,8 +227,18 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent, _tx: &mpsc::Sender<AppEvent
                 SetupStep::DefaultFilePath => ws.default_file_path.push(c),
                 SetupStep::DefaultFileName => ws.default_file_name.push(c),
                 SetupStep::BitwardenEnabled => match c {
-                    'y' | 'Y' => ws.bitwarden_enabled = true,
-                    'n' | 'N' => ws.bitwarden_enabled = false,
+                    'y' | 'Y' => {
+                        ws.bitwarden_enabled = true;
+                        ws.error = None;
+                        ws.step = SetupStep::BitwardenServerUrl;
+                        app.view = View::SetupWizard(ws);
+                        return false;
+                    }
+                    'n' | 'N' => {
+                        ws.bitwarden_enabled = false;
+                        setup_write(app, &ws);
+                        return false;
+                    }
                     _ => {}
                 },
                 SetupStep::BitwardenServerUrl => ws.bitwarden_server_url.push(c),

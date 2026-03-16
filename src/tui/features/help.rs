@@ -45,6 +45,7 @@ pub fn render(frame: &mut Frame, app: &mut AppState) {
         ("a          ", "Add server (wizard)"),
         ("D          ", "Delete selected server"),
         ("d          ", "Toggle dry-run mode"),
+        ("B          ", "Configure Bitwarden vault"),
         ("e          ", "Edit config in $EDITOR"),
         ("?          ", "Show this help"),
         ("q/^C/^D    ", "Quit"),

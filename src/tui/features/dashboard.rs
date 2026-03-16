@@ -310,6 +310,23 @@ pub fn handle_key(
         KeyCode::Char('e') => {
             open_editor(terminal, app);
         }
+        KeyCode::Char('B') => {
+            // Open Bitwarden configuration wizard pre-filled from current config
+            use crate::tui::app::{SetupStep, SetupWizardState};
+            let bw = app.config.bitwarden.as_ref();
+            let ws = SetupWizardState {
+                step: SetupStep::BitwardenEnabled,
+                output_dir: app.config.local_output_dir.clone(),
+                default_user: app.config.default_user.clone().unwrap_or_default(),
+                default_file_path: app.config.default_file_path.clone().unwrap_or_default(),
+                default_file_name: app.config.default_file_name.clone().unwrap_or_default(),
+                bitwarden_enabled: bw.map(|b| b.enabled).unwrap_or(false),
+                bitwarden_server_url: bw.and_then(|b| b.server_url.clone()).unwrap_or_default(),
+                bitwarden_item_prefix: bw.and_then(|b| b.item_prefix.clone()).unwrap_or_default(),
+                ..Default::default()
+            };
+            app.view = View::SetupWizard(ws);
+        }
         _ => {}
     }
     false
